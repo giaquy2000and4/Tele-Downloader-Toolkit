@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
+# Nâng cấp từ bản gốc: tự kiểm tra / tạo .env và cho phép chọn vị trí + tên thư mục tải xuống
+# Source gốc: Telegram Saved Messages Media Downloader  :contentReference[oaicite:0]{index=0}
 """
 Telegram Saved Messages Media Downloader (Console-UI Fixed Width)
-- Đọc cấu hình từ .env
+- Đọc cấu hình từ .env (tự kiểm tra, nếu thiếu sẽ hỏi và tự tạo .env)
+- Cho phép người dùng CHỌN tên folder và NƠI LƯU folder đó -> lưu vào DOWNLOAD_DIR trong .env
 - Quét Saved Messages, chọn tải Ảnh / Video / Cả hai
 - Ảnh -> <DOWNLOAD_DIR>/PIC ; Video -> <DOWNLOAD_DIR>/VID
 - Giao diện console cố định bề ngang, căn dòng gọn gàng, không icon
@@ -342,27 +345,179 @@ class TelegramDownloader:
             await self.client.disconnect()
 
 
+# ============= NÂNG CẤP: TỰ KIỂM TRA / TẠO .env + CHỌN THƯ MỤC =============
+
+ENV_TEMPLATE_HINT = [
+    "Nếu bạn bỏ trống, sẽ dùng giá trị mặc định trong ngoặc vuông [].",
+    "Ví dụ file .env sẽ như sau:",
+    "TELEGRAM_API_ID=20431364",
+    "TELEGRAM_API_HASH=9ac968fa4e5a1b4bfe086560ce8e94c6",
+    "TELEGRAM_PHONE=+84901572620",
+    "DOWNLOAD_DIR=downloads_saved_videos",
+]
+
+def print_env_wizard_header():
+    lines = [
+        pad("ENV SETUP WIZARD - Thiết lập cấu hình .env", WIDTH - 2),
+        pad("Chương trình chưa tìm thấy đủ cấu hình. Hãy nhập thông tin bên dưới.", WIDTH - 2),
+        *[pad(s, WIDTH - 2) for s in ENV_TEMPLATE_HINT],
+    ]
+    print(c(box(lines), Fore.YELLOW))
+
+
+def _ask_input(prompt: str, default: str = "") -> str:
+    show = f"{prompt.strip()} [{'default: ' + default if default else 'required'}]: "
+    val = input(show).strip()
+    if not val and default:
+        return default
+    return val
+
+
+def _choose_download_dir(default_dir: str = "downloads_saved_videos") -> str:
+    # Hỏi nơi lưu và tên thư mục, vẫn giữ UI console gọn gàng
+    lines = [
+        pad("Chọn NƠI LƯU và TÊN FOLDER tải xuống", WIDTH - 2),
+        pad(f"Thư mục mặc định: ./{default_dir}", WIDTH - 2),
+        pad("Bạn có thể nhập đường dẫn TỔNG (ví dụ: D:/Media) và tên folder (ví dụ: MyTG).", WIDTH - 2),
+        pad("Kết quả sẽ là: <đường dẫn tổng>/<tên folder>", WIDTH - 2),
+    ]
+    print(c(box(lines), Fore.CYAN))
+
+    base_path = _ask_input("Nhập đường dẫn tổng (mặc định là thư mục hiện tại)", default=str(Path.cwd()))
+    folder_name = _ask_input("Nhập tên folder lưu file", default=default_dir)
+
+    # Chuẩn hoá đường dẫn
+    try:
+        base_path = Path(base_path).expanduser().resolve()
+    except Exception:
+        base_path = Path.cwd().resolve()
+
+    final_path = (base_path / folder_name).as_posix()
+    confirm_lines = [
+        pad("DOWNLOAD DIR được đặt là:", WIDTH - 2),
+        pad(final_path, WIDTH - 2),
+    ]
+    print(c(box(confirm_lines), Fore.GREEN))
+    return final_path
+
+
+def _write_env_file(path: Path, data: Dict[str, str]) -> None:
+    # Ghi đầy đủ các khoá cần thiết (ghi đè nếu đã tồn tại)
+    content = [
+        f"TELEGRAM_API_ID={data['TELEGRAM_API_ID']}",
+        f"TELEGRAM_API_HASH={data['TELEGRAM_API_HASH']}",
+        f"TELEGRAM_PHONE={data['TELEGRAM_PHONE']}",
+        f"DOWNLOAD_DIR={data['DOWNLOAD_DIR']}",
+        "",
+    ]
+    path.write_text("\n".join(content), encoding="utf-8")
+
+
+def _ensure_env() -> None:
+    """
+    - Kiểm tra sự tồn tại của .env
+    - Nếu chưa có HOẶC thiếu biến, mở wizard hỏi thông tin và tạo/ghi .env
+    - Vẫn giữ nguyên cấu trúc chương trình, chỉ bổ sung bước trước khi load cấu hình
+    """
+    env_path = Path(".env")
+    # Đọc trước (nếu có)
+    load_dotenv(override=False)
+
+    existing = {
+        "TELEGRAM_API_ID": os.getenv("TELEGRAM_API_ID", "").strip(),
+        "TELEGRAM_API_HASH": os.getenv("TELEGRAM_API_HASH", "").strip(),
+        "TELEGRAM_PHONE": os.getenv("TELEGRAM_PHONE", "").strip(),
+        "DOWNLOAD_DIR": os.getenv("DOWNLOAD_DIR", "").strip(),
+    }
+
+    need_wizard = (not env_path.exists()) or (not all(existing.values()))
+
+    if need_wizard:
+        print_env_wizard_header()
+
+        # Hỏi các trường còn thiếu / hoặc hỏi lại để chắc chắn
+        while True:
+            api_id_str = _ask_input("TELEGRAM_API_ID (số nguyên)", default=existing["TELEGRAM_API_ID"] or "")
+            if not api_id_str.isdigit():
+                print(c(pad("Lỗi: TELEGRAM_API_ID phải là số nguyên.", WIDTH, "left"), Fore.RED))
+                continue
+            break
+
+        api_hash = _ask_input("TELEGRAM_API_HASH", default=existing["TELEGRAM_API_HASH"] or "")
+        while not api_hash:
+            print(c(pad("Lỗi: TELEGRAM_API_HASH không được rỗng.", WIDTH, "left"), Fore.RED))
+            api_hash = _ask_input("TELEGRAM_API_HASH", default="")
+
+        phone = _ask_input("TELEGRAM_PHONE", default=existing["TELEGRAM_PHONE"] or "")
+        while not phone:
+            print(c(pad("Lỗi: TELEGRAM_PHONE không được rỗng.", WIDTH, "left"), Fore.RED))
+            phone = _ask_input("TELEGRAM_PHONE", default="")
+
+        # Cho phép chọn nơi lưu + tên folder
+        download_dir = _choose_download_dir(default_dir=existing["DOWNLOAD_DIR"] or "downloads_saved_videos")
+
+        env_data = {
+            "TELEGRAM_API_ID": api_id_str,
+            "TELEGRAM_API_HASH": api_hash,
+            "TELEGRAM_PHONE": phone,
+            "DOWNLOAD_DIR": download_dir,
+        }
+
+        # Ghi file .env (tự tạo nếu chưa có)
+        try:
+            _write_env_file(env_path, env_data)
+            note_lines = [
+                pad(".env đã được tạo/cập nhật thành công với nội dung:", WIDTH - 2),
+                pad(f"TELEGRAM_API_ID={env_data['TELEGRAM_API_ID']}", WIDTH - 2),
+                pad(f"TELEGRAM_API_HASH={env_data['TELEGRAM_API_HASH']}", WIDTH - 2),
+                pad(f"TELEGRAM_PHONE={env_data['TELEGRAM_PHONE']}", WIDTH - 2),
+                pad(f"DOWNLOAD_DIR={env_data['DOWNLOAD_DIR']}", WIDTH - 2),
+            ]
+            print(c(box(note_lines), Fore.GREEN))
+        except Exception as e:
+            print(c(pad(f"Lỗi khi ghi .env: {e}", WIDTH, "left"), Fore.RED))
+            sys.exit(1)
+
+        # Nạp lại biến môi trường từ file vừa ghi
+        load_dotenv(override=True)
+    else:
+        # Có đủ rồi -> thông báo ngắn gọn (giữ giao diện)
+        info_lines = [
+            pad(".env đã sẵn sàng. Dùng cấu hình hiện tại.", WIDTH - 2),
+            pad(f"DOWNLOAD_DIR={existing['DOWNLOAD_DIR'] or 'downloads_saved_videos'}", WIDTH - 2),
+        ]
+        print(c(box(info_lines), Fore.CYAN))
+
+
 def load_config_from_env() -> Tuple[int, str, str, str]:
-    load_dotenv()
+    # Đảm bảo .env tồn tại/đủ biến; nếu thiếu thì mở wizard và tạo file
+    _ensure_env()
+
+    # Sau khi chắc chắn có .env, đọc biến
+    load_dotenv(override=False)
 
     api_id_str = os.getenv("TELEGRAM_API_ID", "").strip()
     api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
     phone = os.getenv("TELEGRAM_PHONE", "").strip()
     download_dir = os.getenv("DOWNLOAD_DIR", "downloads_saved_videos").strip()
 
-    if not api_id_str or not api_hash or not phone:
-        print("Missing .env config (TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_PHONE)")
-        print("Example .env:")
-        print("TELEGRAM_API_ID=20431364")
-        print("TELEGRAM_API_HASH=9ac968fa4e5a1b4bfe086560ce8e94c6")
-        print("TELEGRAM_PHONE=+84901572620")
-        print("DOWNLOAD_DIR=downloads_saved_videos")
+    # Chốt kiểm tra
+    missing = []
+    if not api_id_str:
+        missing.append("TELEGRAM_API_ID")
+    if not api_hash:
+        missing.append("TELEGRAM_API_HASH")
+    if not phone:
+        missing.append("TELEGRAM_PHONE")
+
+    if missing:
+        print(c(pad(f"Missing .env config: {', '.join(missing)}", WIDTH, "left"), Fore.RED))
         sys.exit(1)
 
     try:
         api_id = int(api_id_str)
     except ValueError:
-        print("TELEGRAM_API_ID must be integer.")
+        print(c(pad("TELEGRAM_API_ID must be integer.", WIDTH, "left"), Fore.RED))
         sys.exit(1)
 
     return api_id, api_hash, phone, download_dir
