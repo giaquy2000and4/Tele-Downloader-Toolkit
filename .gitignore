@@ -1,4 +1,5 @@
 session.session
 .env
-.ini
-.cfg
+*.ini
+*.cfg
+
