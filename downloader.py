@@ -391,6 +391,10 @@ class TelegramDownloader:
             if not await self.client.is_user_authorized():
                 print(pad("Signing in...", WIDTH, "left"))
                 try:
+                    # In thông tin tài khoản đang đăng nhập (mask số điện thoại)
+                    masked_phone = self.phone[:3] + "****" + self.phone[-4:]
+                    print(c(pad(f"Đang đăng nhập tài khoản #{self.account_index} ({masked_phone}) → gửi mã...", WIDTH,
+                                "left"), Fore.YELLOW))
                     await self.client.send_code_request(self.phone)
                 except FloodWaitError as e:
                     print(c(pad(f"Quá nhiều lần thử. Hãy chờ {e.seconds} giây.", WIDTH, "left"), Fore.RED))
