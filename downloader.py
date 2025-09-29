@@ -215,22 +215,24 @@ def do_reset_flow() -> Dict[str, str]:
         print("Huỷ RESET.")
         return load_env(Path(".env"))
 
-def purge_session_files() -> None:
-    names = ["session.session", "session.session-journal", "session"]
-    for n in names:
-        p = Path(n)
+def purge_session_files_for(account_index: int) -> None:
+    base = Path(f"sessions/session_{account_index}")
+    extensions = ["", ".session", ".session-journal"]
+    for ext in extensions:
+        path = base.with_suffix(ext)
         try:
-            if p.exists():
-                p.unlink()
+            if path.exists():
+                path.unlink()
         except Exception:
             pass
+
 
 async def do_logout_flow(envd: Dict[str, str]) -> Dict[str, str]:
     idx = get_current_account_index(envd)
     if idx == 0:
         print(c(pad("Chưa đăng nhập. Không có phiên nào để logout.", WIDTH, "left"), Fore.YELLOW))
         return envd
-    purge_session_files()
+    purge_session_files_for(idx)
     print(c(pad("Đã xoá session local. Nếu muốn đăng nhập lại, chọn LOGIN.", WIDTH, "left"), Fore.GREEN))
     return envd
 
@@ -343,7 +345,11 @@ class TelegramDownloader:
         self.download_dir = Path(download_dir)
         self.pic_dir = self.download_dir / "PIC"
         self.vid_dir = self.download_dir / "VID"
-        self.client = TelegramClient('session', api_id, api_hash)
+
+        session_dir = Path("sessions")
+        session_dir.mkdir(exist_ok=True)
+        session_path = session_dir / f"session_{account_index}"
+        self.client = TelegramClient(str(session_path), api_id, api_hash)
 
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.pic_dir.mkdir(exist_ok=True)
