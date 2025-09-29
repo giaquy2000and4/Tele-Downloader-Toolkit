@@ -35,6 +35,13 @@ try:
     from telethon import TelegramClient
     from telethon.errors import SessionPasswordNeededError
     from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+    from telethon.errors import (
+        SessionPasswordNeededError,
+        PhoneCodeInvalidError,
+        PhoneCodeExpiredError,
+        PasswordHashInvalidError,
+        FloodWaitError,
+    )
 except ImportError as e:
     print(f"Missing package: {e}")
     print("Install: pip install telethon")
@@ -383,13 +390,40 @@ class TelegramDownloader:
             await self.client.connect()
             if not await self.client.is_user_authorized():
                 print(pad("Signing in...", WIDTH, "left"))
-                await self.client.send_code_request(self.phone)
-                code = input("Enter the login code: ").strip()
                 try:
-                    await self.client.sign_in(self.phone, code)
-                except SessionPasswordNeededError:
-                    pw = input("2FA password: ").strip()
-                    await self.client.sign_in(password=pw)
+                    await self.client.send_code_request(self.phone)
+                except FloodWaitError as e:
+                    print(c(pad(f"Quá nhiều lần thử. Hãy chờ {e.seconds} giây.", WIDTH, "left"), Fore.RED))
+                    return False
+
+                # Retry OTP (3 lần)
+                for attempt in range(3):
+                    code = input(f"Nhập mã OTP ({attempt + 1}/3): ").strip()
+                    try:
+                        await self.client.sign_in(self.phone, code)
+                        break  # thành công
+                    except PhoneCodeInvalidError:
+                        print(c(pad("❌ Mã OTP không đúng. Vui lòng thử lại.", WIDTH, "left"), Fore.RED))
+                    except PhoneCodeExpiredError:
+                        print(c(pad("⏰ Mã OTP đã hết hạn. Vui lòng gửi lại mã.", WIDTH, "left"), Fore.YELLOW))
+                        return False
+                    except SessionPasswordNeededError:
+                        # Vào luồng 2FA
+                        for pw_attempt in range(2):
+                            pw = input(f"Nhập mật khẩu 2FA ({pw_attempt + 1}/2): ").strip()
+                            try:
+                                await self.client.sign_in(password=pw)
+                                break  # thành công
+                            except PasswordHashInvalidError:
+                                print(c(pad("❌ Sai mật khẩu 2FA. Vui lòng thử lại.", WIDTH, "left"), Fore.RED))
+                        else:
+                            print(c(pad("🚫 Quá số lần nhập sai 2FA.", WIDTH, "left"), Fore.RED))
+                            return False
+                        break
+                else:
+                    print(c(pad("🚫 Quá số lần nhập sai OTP.", WIDTH, "left"), Fore.RED))
+                    return False
+
             me = await self.client.get_me()
             display = f"{(me.first_name or '').strip()} {(me.last_name or '').strip()}".strip()
             username = f"@{me.username}" if getattr(me, 'username', None) else ""
