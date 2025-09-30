@@ -472,6 +472,16 @@ class TelegramDownloader:
         print(pad(f"Scanning {len(dialogs)} dialog(s) for media...", WIDTH, "left"))
         media_messages: List[Dict[str, Any]] = []
         message_count = 0
+        # RESET stats for a new scan operation
+        self.stats = {
+            'total_found': 0,
+            'images_found': 0,
+            'videos_found': 0,
+            'downloaded': 0,
+            'skipped': 0,
+            'errors': 0,
+            'total_size': 0,
+        }
         with tqdm(
             desc="Scanning",
             unit="msg",
@@ -511,6 +521,16 @@ class TelegramDownloader:
         print(pad("Scanning Saved Messages...", WIDTH, "left"))
         media_messages: List[Dict[str, Any]] = []
         message_count = 0
+        # RESET stats for a new scan operation
+        self.stats = {
+            'total_found': 0,
+            'images_found': 0,
+            'videos_found': 0,
+            'downloaded': 0,
+            'skipped': 0,
+            'errors': 0,
+            'total_size': 0,
+        }
         with tqdm(
             desc="Scanning",
             unit="msg",
@@ -667,7 +687,7 @@ class TelegramDownloader:
         """
         # 1) Scan theo nguồn
         if src_type == "saved":
-            media_list = await self.scan_media_in_dialogs(['me'])
+            media_list = await self.scan_saved_messages()
             dialog_ids = ["me"]
         else:
             if chosen_entities is None:
