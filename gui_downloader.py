@@ -1,4 +1,6 @@
-#!/usr/bin/env python3
+
+
+# !/usr/bin/env python3
 """
 Telegram Media Downloader - CustomTkinter GUI
 Theme: Black-Cyan Dark Mode
@@ -9,7 +11,7 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import asyncio
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 import threading
 import sys
 import os
@@ -27,6 +29,15 @@ from downloader import (
     pick_account_index,
     purge_session_files_for,
     ENV_TEMPLATE
+)
+
+# Thêm các lỗi Telethon cần thiết
+from telethon.errors import (
+    SessionPasswordNeededError,
+    PhoneCodeInvalidError,
+    PhoneCodeExpiredError,
+    PasswordHashInvalidError,
+    FloodWaitError,
 )
 
 
@@ -67,10 +78,7 @@ class TelegramDownloaderGUI:
         self.download_thread = None
         self.is_downloading = False
         self.stop_flag = False
-        self.active_loop = None  # Lưu event loop đang hoạt động
-
-        # Async loop cho Telethon
-        self.loop = None
+        self.active_loop: Optional[asyncio.AbstractEventLoop] = None  # Lưu event loop đang hoạt động
 
         # Stats tracking
         self.stats = {
@@ -415,7 +423,7 @@ class TelegramDownloaderGUI:
             # Sử dụng lại event loop đã lưu
             loop = self.active_loop
             if loop is None or loop.is_closed():
-                raise RuntimeError("Active event loop is not available")
+                raise RuntimeError("Active event loop is not available for fetching dialogs.")
 
             asyncio.set_event_loop(loop)  # Gán lại event loop hiện tại
             dialogs = loop.run_until_complete(self._fetch_dialogs_async())
@@ -429,8 +437,10 @@ class TelegramDownloaderGUI:
     async def _fetch_dialogs_async(self):
         """Fetch dialogs qua Telethon"""
         # Đảm bảo đã connect
-        if not self.downloader.client.is_connected():
-            await self.downloader.client.connect()
+        if not self.downloader or not self.downloader.client.is_connected():
+            # This should ideally not happen if flow is correct, but as a safeguard
+            self.root.after(0, lambda: messagebox.showerror("Error", "Telethon client not connected!"))
+            return []
 
         dialogs = []
         idx = 0
@@ -827,28 +837,8 @@ class TelegramDownloaderGUI:
 
     def _show_error(self, message):
         """Hiển thị error message"""
-        self.clear_screen()
-        ctk.CTkLabel(
-            self.main_container,
-            text="Error",
-            font=ctk.CTkFont(size=20, weight="bold"),
-            text_color=self.colors['error']
-        ).pack(pady=(50, 10))
-
-        ctk.CTkLabel(
-            self.main_container,
-            text=message,
-            font=ctk.CTkFont(size=12),
-            text_color=self.colors['text']
-        ).pack(pady=10)
-
-        ctk.CTkButton(
-            self.main_container,
-            text="Back",
-            fg_color=self.colors['accent'],
-            hover_color=self.colors['accent_hover'],
-            command=self.show_source_screen
-        ).pack(pady=20)
+        messagebox.showerror("Error", message)
+        self.show_login_screen()  # Fallback to login screen on error
 
     # ==================== EVENT HANDLERS ====================
     def browse_directory(self):
@@ -898,6 +888,12 @@ class TelegramDownloaderGUI:
         """Initialize downloader và connect trong background"""
         cfg = get_account_config(self.envd, self.current_account_idx)
 
+        # Ensure a fresh event loop for the downloader operations
+        if self.active_loop and not self.active_loop.is_closed():
+            self.active_loop.stop()
+            self.active_loop.close()
+        self.active_loop = asyncio.new_event_loop()
+
         # Show loading
         self.clear_screen()
         loading = ctk.CTkLabel(
@@ -911,48 +907,17 @@ class TelegramDownloaderGUI:
         # Connect trong thread
         threading.Thread(
             target=self._connect_thread,
-            args=(cfg,),
+            args=(cfg, self.active_loop),  # Pass the loop to the thread
             daemon=True
         ).start()
 
-    def _connect_thread(self, cfg):
+    def _connect_thread(self, cfg: Dict[str, str], loop_to_use: asyncio.AbstractEventLoop):
         """Connect to Telegram trong background thread"""
         try:
-            # Tạo async function để khởi tạo và connect
-            async def init_and_connect():
-                from telethon import TelegramClient
-                from telethon.errors import SessionPasswordNeededError
+            # Set the event loop for this thread
+            asyncio.set_event_loop(loop_to_use)
 
-                # Tạo client TRONG async context
-                session_dir = Path("sessions")
-                session_dir.mkdir(exist_ok=True)
-                session_path = session_dir / f"session_{self.current_account_idx}"
-
-                client = TelegramClient(
-                    str(session_path),
-                    int(cfg["API_ID"]),
-                    cfg["API_HASH"]
-                )
-
-                await client.connect()
-
-                # Tạo downloader object (không tạo client mới)
-                # Ta sẽ gán client này vào downloader sau
-
-                if not await client.is_user_authorized():
-                    # Gửi code request
-                    await client.send_code_request(cfg["PHONE"])
-                    return client, "need_code"
-                else:
-                    return client, "success"
-
-            # Chạy trong event loop
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            client, result = loop.run_until_complete(init_and_connect())
-            # Giữ loop mở cho các operations sau
-
-            # Tạo downloader và gán client
+            # Instantiate the TelegramDownloader, it will create its client internally
             self.downloader = TelegramDownloader(
                 api_id=int(cfg["API_ID"]),
                 api_hash=cfg["API_HASH"],
@@ -960,20 +925,50 @@ class TelegramDownloaderGUI:
                 download_dir=cfg["DOWNLOAD_DIR"],
                 account_index=self.current_account_idx
             )
-            # Override client đã tạo
-            self.downloader.client = client
 
-            # Lưu loop để dùng sau
-            self.active_loop = loop
+            # Connect the client using the provided event loop
+            is_connected, status_code = loop_to_use.run_until_complete(self._connect_client_with_status())
 
-            if result == "need_code":
-                self.root.after(0, self._show_otp_dialog)
-            elif result == "success":
-                self.root.after(0, self.show_source_screen)
+            if is_connected:
+                if status_code == "success":
+                    self.root.after(0, self.show_source_screen)
+                elif status_code == "need_code":
+                    self.root.after(0, self._show_otp_dialog)
+            # If not connected, error message would have been shown by _connect_client_with_status
+            else:
+                self.root.after(0, self.show_login_screen)  # Return to login if connection fails
 
         except Exception as e:
-            error_msg = f"Connection error: {str(e)}\n\nMake sure your API credentials are correct."
+            error_msg = f"Connection error: {str(e)}\n\nMake sure your API credentials are correct or check your network."
             self.root.after(0, lambda msg=error_msg: self._show_error(msg))
+
+    async def _connect_client_with_status(self) -> Tuple[bool, str]:
+        """Async function to connect client and return status"""
+        if not self.downloader:
+            self.root.after(0, lambda: messagebox.showerror("Error", "Downloader not initialized."))
+            return False, "error"
+        try:
+            await self.downloader.client.connect()
+            if not await self.downloader.client.is_user_authorized():
+                try:
+                    await self.downloader.client.send_code_request(self.downloader.phone)
+                    return True, "need_code"
+                except FloodWaitError as e:
+                    self.root.after(0, lambda: messagebox.showerror("Connection Error",
+                                                                    f"Too many attempts. Please wait {e.seconds} seconds before trying again."))
+                    await self.downloader.client.disconnect()  # Disconnect on flood wait
+                    return False, "flood_wait"
+            else:
+                return True, "success"
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Connection Error",
+                                                            f"Failed to connect: {e}\nPlease check your network or API credentials."))
+            try:
+                if self.downloader.client.is_connected():
+                    await self.downloader.client.disconnect()
+            except Exception:
+                pass  # Ignore errors during disconnect attempt
+            return False, f"error: {str(e)}"
 
     def _show_otp_dialog(self):
         """Hiển thị dialog nhập OTP"""
@@ -1052,8 +1047,12 @@ class TelegramDownloaderGUI:
     def _verify_otp_thread(self, code):
         """Verify OTP trong background"""
         try:
+            loop = self.active_loop
+            if loop is None or loop.is_closed():
+                raise RuntimeError("Active event loop is not available for OTP verification.")
+            asyncio.set_event_loop(loop)
+
             async def sign_in():
-                from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
                 try:
                     cfg = get_account_config(self.envd, self.current_account_idx)
                     await self.downloader.client.sign_in(cfg["PHONE"], code)
@@ -1062,18 +1061,12 @@ class TelegramDownloaderGUI:
                     return "need_password"
                 except PhoneCodeInvalidError:
                     return "invalid_code"
+                except PhoneCodeExpiredError:  # Handle expired code
+                    return "expired_code"
                 except Exception as e:
                     raise e
 
-            # Sử dụng loop đã có
-            if self.active_loop and not self.active_loop.is_closed():
-                asyncio.set_event_loop(self.active_loop)
-                result = self.active_loop.run_until_complete(sign_in())
-            else:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                result = loop.run_until_complete(sign_in())
-                self.active_loop = loop
+            result = loop.run_until_complete(sign_in())
 
             if result == "need_password":
                 self.root.after(0, self._show_2fa_dialog)
@@ -1083,6 +1076,10 @@ class TelegramDownloaderGUI:
                 error_msg = "Invalid verification code. Please try again."
                 self.root.after(0, lambda msg=error_msg: messagebox.showerror("Error", msg))
                 self.root.after(100, self._show_otp_dialog)
+            elif result == "expired_code":  # Handle expired code in UI
+                error_msg = "Verification code has expired. Please request a new one."
+                self.root.after(0, lambda msg=error_msg: messagebox.showerror("Error", msg))
+                self.root.after(100, self.show_login_screen)  # Go back to login to re-send code
 
         except Exception as e:
             error_msg = f"Verification failed: {str(e)}"
@@ -1153,8 +1150,12 @@ class TelegramDownloaderGUI:
     def _verify_2fa_thread(self, password):
         """Verify 2FA trong background"""
         try:
+            loop = self.active_loop
+            if loop is None or loop.is_closed():
+                raise RuntimeError("Active event loop is not available for 2FA verification.")
+            asyncio.set_event_loop(loop)
+
             async def sign_in_2fa():
-                from telethon.errors import PasswordHashInvalidError
                 try:
                     await self.downloader.client.sign_in(password=password)
                     return "success"
@@ -1163,15 +1164,7 @@ class TelegramDownloaderGUI:
                 except Exception as e:
                     raise e
 
-            # Sử dụng loop đã có
-            if self.active_loop and not self.active_loop.is_closed():
-                asyncio.set_event_loop(self.active_loop)
-                result = self.active_loop.run_until_complete(sign_in_2fa())
-            else:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                result = loop.run_until_complete(sign_in_2fa())
-                self.active_loop = loop
+            result = loop.run_until_complete(sign_in_2fa())
 
             if result == "success":
                 self.root.after(0, self.show_source_screen)
@@ -1190,41 +1183,56 @@ class TelegramDownloaderGUI:
         self.envd = set_current_account_index(self.envd, idx)
         save_env(self.env_path, self.envd)
 
-        cfg = get_account_config(self.envd, idx)
         self._init_downloader_and_connect()
 
     def handle_logout_current(self):
         """Logout account hiện tại"""
-        if self.current_account_idx == 0:
+        if self.current_account_idx == 0 or not self.downloader:
             messagebox.showinfo("No Account", "No account is currently logged in.")
             return
 
         if messagebox.askyesno("Confirm Logout", f"Logout account #{self.current_account_idx}?"):
             purge_session_files_for(self.current_account_idx)
+            self.current_account_idx = 0  # Reset current account
+            self.envd = set_current_account_index(self.envd, 0)
+            save_env(self.env_path, self.envd)
             messagebox.showinfo("Logged Out", "Session files deleted. You can login again.")
+            self._disconnect_and_close_loop()  # Ensure resources are cleaned up
             self.show_login_screen()
 
     def handle_logout_and_return(self):
         """Logout và quay về login screen"""
         if messagebox.askyesno("Confirm", "Logout and return to login screen?"):
-            if self.downloader and self.downloader.client:
-                # Disconnect trong thread
-                threading.Thread(
-                    target=lambda: asyncio.run(self.downloader.client.disconnect()),
-                    daemon=True
-                ).start()
+            self._disconnect_and_close_loop()
             self.show_login_screen()
 
     def handle_reset(self):
         """Reset .env file"""
-        if messagebox.askyesno("Confirm Reset", "Reset all config? This will delete all account info!"):
+        if messagebox.askyesno("Confirm Reset",
+                               "Reset all config? This will delete all account info and saved sessions!"):
             self.envd = {"CURRENT_ACCOUNT": "0"}
             save_env(self.env_path, self.envd)
-            messagebox.showinfo("Reset", "Config has been reset!")
+            # Purge all session files
+            try:
+                session_dir = Path("sessions")
+                if session_dir.exists():
+                    for f in session_dir.iterdir():
+                        if f.is_file() and f.name.startswith("session_"):
+                            f.unlink()
+            except Exception as e:
+                print(f"Error purging session files: {e}")
+
+            messagebox.showinfo("Reset", "Config and all session files have been reset!")
+            self._disconnect_and_close_loop()  # Ensure resources are cleaned up
             self.show_login_screen()
 
     def select_source(self, source_type):
         """Xử lý lựa chọn source"""
+        if not self.downloader or not self.downloader.client.is_connected():
+            messagebox.showerror("Not Connected", "Please login first.")
+            self.show_login_screen()
+            return
+
         self.current_source_type = source_type
 
         if source_type == "saved":
@@ -1233,7 +1241,7 @@ class TelegramDownloaderGUI:
         elif source_type == "dialogs":
             self.show_dialogs_screen()
         elif source_type == "all":
-            # Show loading và fetch all dialogs
+            # Show loading and fetch all dialogs
             self.clear_screen()
             loading = ctk.CTkLabel(
                 self.main_container,
@@ -1249,15 +1257,18 @@ class TelegramDownloaderGUI:
     def _fetch_all_dialogs_and_scan(self):
         """Fetch tất cả dialogs và scan"""
         try:
-            loop = asyncio.new_event_loop()
+            loop = self.active_loop
+            if loop is None or loop.is_closed():
+                raise RuntimeError("Active event loop is not available for fetching all dialogs.")
             asyncio.set_event_loop(loop)
+
             dialogs = loop.run_until_complete(self._fetch_dialogs_async())
-            loop.close()
+            # Don't close loop here, it's the active_loop for the client
 
             self.selected_dialogs = [d['entity'] for d in dialogs]
             self.root.after(0, self.scan_and_show_filter)
         except Exception as e:
-            error_msg = f"Failed to fetch dialogs: {str(e)}"
+            error_msg = f"Failed to fetch all dialogs: {str(e)}"
             self.root.after(0, lambda msg=error_msg: self._show_error(msg))
 
     def scan_and_show_filter(self):
@@ -1278,7 +1289,9 @@ class TelegramDownloaderGUI:
     def _scan_media_thread(self):
         """Scan media trong background"""
         try:
-            loop = asyncio.new_event_loop()
+            loop = self.active_loop
+            if loop is None or loop.is_closed():
+                raise RuntimeError("Active event loop is not available for scanning media.")
             asyncio.set_event_loop(loop)
 
             if self.selected_dialogs == ['me']:
@@ -1288,7 +1301,7 @@ class TelegramDownloaderGUI:
                     self.downloader.scan_media_in_dialogs(self.selected_dialogs)
                 )
 
-            loop.close()
+            # Don't close loop here, it's the active_loop for the client
 
             self.media_list = media_list
             self.stats = self.downloader.stats.copy()
@@ -1300,19 +1313,72 @@ class TelegramDownloaderGUI:
 
     def continue_last_session(self):
         """Tiếp tục session trước"""
+        if not self.downloader:
+            messagebox.showerror("Error", "Downloader not initialized.")
+            return
+
         state = self.downloader.state
         prev = state.get_source()
 
         if not prev or not prev.get("type"):
             messagebox.showinfo("No Session", "No previous session found to continue.")
+            self.show_source_screen()
             return
 
-        # TODO: Reconstruct source và continue
-        messagebox.showinfo("Continue", "Continue last session feature - under construction")
-        self.show_source_screen()
+        typ = prev.get("type")
+        dialog_ids_from_state = prev.get("dialog_ids", [])
+
+        # Reconstruct selected_dialogs based on state
+        if typ == "saved":
+            self.selected_dialogs = ['me']
+        else:  # "dialogs" or "all"
+            want_ids = [int(x) for x in dialog_ids_from_state if str(x).isdigit() and int(x) != 0]
+            if not want_ids:
+                messagebox.showinfo("No Session", "Could not restore dialogs from previous session.")
+                self.show_source_screen()
+                return
+
+            def _restore_dialogs_thread():
+                try:
+                    loop = self.active_loop
+                    if loop is None or loop.is_closed():
+                        raise RuntimeError("Active event loop is not available for restoring dialogs.")
+                    asyncio.set_event_loop(loop)
+
+                    all_dialogs_info = loop.run_until_complete(self._fetch_dialogs_async())
+                    restored_entities = []
+                    for d_info in all_dialogs_info:
+                        if int(getattr(d_info["entity"], "id", 0)) in want_ids:
+                            restored_entities.append(d_info["entity"])
+
+                    if not restored_entities:
+                        self.root.after(0, lambda: messagebox.showinfo("No Session",
+                                                                       "Could not restore dialogs from previous session."))
+                        self.root.after(0, self.show_source_screen)
+                        return
+
+                    self.selected_dialogs = restored_entities
+                    self.current_source_type = typ  # Restore source type
+                    self.root.after(0, self.scan_and_show_filter)
+
+                except Exception as e:
+                    self.root.after(0,
+                                    lambda msg=f"Error restoring previous session: {e}": messagebox.showerror("Error",
+                                                                                                              msg))
+                    self.root.after(0, self.show_source_screen)
+
+            threading.Thread(target=_restore_dialogs_thread, daemon=True).start()
+            return  # Exit early, thread will continue flow
+
+        self.current_source_type = typ  # Restore source type
+        self.scan_and_show_filter()
 
     def start_download(self, filter_choice):
         """Bắt đầu download với filter đã chọn"""
+        if not self.downloader:
+            messagebox.showerror("Error", "Downloader not initialized.")
+            return
+
         self.current_filter = filter_choice
 
         # Filter media list
@@ -1352,7 +1418,9 @@ class TelegramDownloaderGUI:
     def _download_thread(self):
         """Download thread"""
         try:
-            loop = asyncio.new_event_loop()
+            loop = self.active_loop
+            if loop is None or loop.is_closed():
+                raise RuntimeError("Active event loop is not available for downloading.")
             asyncio.set_event_loop(loop)
 
             total = len(self.filtered_media_list)
@@ -1390,20 +1458,20 @@ class TelegramDownloaderGUI:
                             self.downloader.stats['errors'] += 1
                     except Exception as e:
                         self.downloader.stats['errors'] += 1
-                        print(f"Download error: {e}")
+                        print(f"Download error (msg {msg.id}): {e}")  # Log error to console
 
                 # Update UI
                 progress = (idx + 1) / total
                 curr = idx + 1
                 self.root.after(0, lambda p=progress, i=curr, t=total: self._update_download_progress(p, i, t))
 
-            loop.close()
+            # Don't close loop here, it's the active_loop for the client
 
             # Hoàn thành
             self.root.after(0, self._download_complete)
 
         except Exception as e:
-            error_msg = f"Download error: {str(e)}"
+            error_msg = f"Download thread error: {str(e)}"
             self.root.after(0, lambda msg=error_msg: self._show_error(msg))
 
     def _update_download_progress(self, progress, current, total):
@@ -1444,6 +1512,8 @@ class TelegramDownloaderGUI:
             f"Errors: {self.downloader.stats['errors']}\n"
             f"Total size: {self._format_size(self.downloader.stats['total_size'])}"
         )
+        self.is_downloading = False
+        self.stop_flag = False
         self.show_source_screen()
 
     def toggle_download(self):
@@ -1453,6 +1523,8 @@ class TelegramDownloaderGUI:
             self.pause_btn.configure(text="Pause")
         else:
             self.pause_btn.configure(text="Resume")
+        self._update_download_progress(self.progress_bar.get(), int(self.progress_label.cget("text").split('/')[0]),
+                                       int(self.progress_label.cget("text").split('/')[1]))
 
     def stop_download(self):
         """Stop download"""
@@ -1464,16 +1536,57 @@ class TelegramDownloaderGUI:
             if self.download_thread and self.download_thread.is_alive():
                 self.download_thread.join(timeout=2)
 
-            self.show_source_screen()
+            self.root.after(0, self.show_source_screen)
 
     def on_closing(self):
         """Xử lý khi đóng cửa sổ"""
         if self.is_downloading:
             if messagebox.askyesno("Confirm Exit", "Download in progress. Exit anyway?"):
                 self.stop_flag = True
+                # Give a moment for the thread to recognize stop_flag
+                if self.download_thread and self.download_thread.is_alive():
+                    self.download_thread.join(timeout=1)
+                self._disconnect_and_close_loop()
                 self.root.destroy()
         else:
+            self._disconnect_and_close_loop()
             self.root.destroy()
+
+    def _disconnect_and_close_loop(self):
+        """Disconnect Telegram client and close the active event loop."""
+        if self.downloader and self.downloader.client and self.downloader.client.is_connected():
+            try:
+                # To disconnect safely, we need to run it within the active event loop.
+                # Since the loop might not be continuously running, we execute this in a temporary context.
+                if self.active_loop and not self.active_loop.is_closed():
+                    # Attempt to run disconnect within the active loop if it's not already closed.
+                    # We might need to briefly set the loop for the current thread.
+                    current_thread_loop = None
+                    try:
+                        current_thread_loop = asyncio.get_event_loop()
+                    except RuntimeError:  # No current event loop in this thread
+                        pass
+
+                    if current_thread_loop is not self.active_loop:
+                        asyncio.set_event_loop(self.active_loop)
+
+                    try:
+                        self.active_loop.run_until_complete(self.downloader.client.disconnect())
+                    except Exception as e:
+                        print(f"Error during Telethon client disconnect: {e}")
+                    finally:
+                        if current_thread_loop:  # Restore original loop if it existed
+                            asyncio.set_event_loop(current_thread_loop)
+                else:
+                    print("Active loop not available or closed for graceful disconnect. Client might remain connected.")
+            except Exception as e:
+                print(f"Error attempting client disconnect: {e}")
+
+        if self.active_loop and not self.active_loop.is_closed():
+            self.active_loop.stop()
+            self.active_loop.close()
+        self.active_loop = None  # Reset the loop
+        self.downloader = None  # Reset downloader instance
 
     def run(self):
         """Chạy GUI"""
