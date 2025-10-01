@@ -79,7 +79,7 @@ The GUI offers:
 
 Allows adding new accounts or selecting existing ones.
 
-<img src="docs/screenshots/login_screen.png" width="600" alt="Login Screen" />
+<img src="docs/screenshots/UI_UX_v1/login_screen.png" width="600" alt="Login Screen" />
 
 ---
 
@@ -87,9 +87,9 @@ Allows adding new accounts or selecting existing ones.
 
 Choose where to download media from.
 
-<img src="docs/screenshots/source_selection_1.png" width="600" alt="Source Selection Options" />
+<img src="docs/screenshots/UI_UX_v1/source_selection_1.png" width="600" alt="Source Selection Options" />
 
-<img src="docs/screenshots/source_selection_2.png" width="600" alt="Dialogs Selection" />
+<img src="docs/screenshots/UI_UX_v1/source_selection_2.png" width="600" alt="Dialogs Selection" />
 
 ---
 
@@ -97,7 +97,7 @@ Choose where to download media from.
 
 Select which types of media to download.
 
-<img src="docs/screenshots/download_selection.png" width="600" alt="Download Type Selection" />
+<img src="docs/screenshots/UI_UX_v1/download_selection.png" width="600" alt="Download Type Selection" />
 
 ---
 
@@ -105,7 +105,7 @@ Select which types of media to download.
 
 Live statistics and download progress.
 
-<img src="docs/screenshots/download_process.png" width="600" alt="Download Progress View" />
+<img src="docs/screenshots/UI_UX_v1/download_process.png" width="600" alt="Download Progress View" />
 
 ---
 
