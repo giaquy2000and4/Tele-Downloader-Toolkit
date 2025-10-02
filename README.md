@@ -87,9 +87,7 @@ Allows adding new accounts or selecting existing ones.
 
 Choose where to download media from.
 
-<img src="docs/screenshots/UI_UX_v1/source_selection_1.png" width="600" alt="Source Selection Options" />
-
-<img src="docs/screenshots/UI_UX_v1/source_selection_2.png" width="600" alt="Dialogs Selection" />
+<img src="docs/screenshots/UI_UX_v1/source_selection.png" width="600" alt="Source Selection Options" />
 
 ---
 
