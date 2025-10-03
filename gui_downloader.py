@@ -9,10 +9,11 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import asyncio
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple, Any
+from typing import Optional, Dict, List, Tuple, Any, Callable
 import threading
 import sys
 import os
+import humanize
 
 # Import từ file downloader.py gốc
 from downloader import (
@@ -24,9 +25,12 @@ from downloader import (
     get_current_account_index,
     get_account_config,
     set_current_account_index,
-    pick_account_index,
     purge_session_files_for,
-    ENV_TEMPLATE
+    ENV_TEMPLATE,
+    input_nonempty,  # Import this for cleaner login flow logic
+    do_login_flow,  # Import to reuse account management logic
+    do_reset_flow,  # Import to reuse reset logic
+    do_logout_flow  # Import to reuse logout logic
 )
 
 # Thêm các lỗi Telethon cần thiết
@@ -78,6 +82,10 @@ class TelegramDownloaderGUI:
         self.stop_flag = False
         self.active_loop: Optional[asyncio.AbstractEventLoop] = None  # Lưu event loop đang hoạt động
 
+        # For blocking/unblocking threads for user input via GUI dialogs
+        self._gui_event = threading.Event()
+        self._gui_input_result: Any = None
+
         # Stats tracking
         self.stats = {
             'total_found': 0,
@@ -91,11 +99,12 @@ class TelegramDownloaderGUI:
 
         # Media list và source info
         self.media_list = []
+        self.filtered_media_list = []  # Filtered list for actual download
         self.current_source_type = None
         self.current_filter = "3"  # 1=photos, 2=videos, 3=both
         self.selected_dialogs = []
-        self.all_dialogs_info: List[Dict[str, Any]] = [] # To store all fetched dialogs for search/filter
-        self.continue_selected_btn: Optional[ctk.CTkButton] = None # Khai báo nút continue ở header
+        self.all_dialogs_info: List[Dict[str, Any]] = []  # To store all fetched dialogs for search/filter
+        self.continue_selected_btn: Optional[ctk.CTkButton] = None  # Khai báo nút continue ở header
 
         # Configure root
         self.root.configure(fg_color=self.colors['bg'])
@@ -135,6 +144,56 @@ class TelegramDownloaderGUI:
                     'status': 'active' if idx == self.current_account_idx else 'inactive'
                 })
         return accounts
+
+    # ==================== GUI-SPECIFIC I/O FUNCTIONS ====================
+    def gui_log_output(self, message: str, color_tag: Optional[str] = None):
+        """Custom log function to append messages to the GUI's log textbox."""
+        # This function must be thread-safe for GUI updates
+        self.root.after(0, lambda: self._append_log(message, color_tag))
+
+    def gui_get_input(self, prompt: str, default: Optional[str] = None) -> str:
+        """Custom input function to get user input via a CTkToplevel dialog."""
+        self._gui_input_result = None
+        self._gui_event.clear()  # Clear the event before waiting
+
+        def show_input_dialog():
+            dialog = ctk.CTkToplevel(self.root)
+            dialog.title("Input Required")
+            dialog.geometry("400x200")
+            dialog.transient(self.root)
+            dialog.grab_set()
+
+            ctk.CTkLabel(dialog, text=prompt, text_color=self.colors['text']).pack(pady=(10, 5))
+
+            entry = ctk.CTkEntry(dialog, placeholder_text=default or "", fg_color=self.colors['card'],
+                                 border_color=self.colors['accent'])
+            entry.pack(pady=5, padx=20, fill="x")
+            if default:
+                entry.insert(0, default)
+
+            def submit():
+                self._gui_input_result = entry.get() or default or ""  # Return default if empty and provided
+                dialog.destroy()
+                self._gui_event.set()  # Signal the waiting thread
+
+            def cancel():
+                self._gui_input_result = ""  # Return empty string for cancellation
+                dialog.destroy()
+                self._gui_event.set()
+
+            ctk.CTkButton(dialog, text="Submit", command=submit, fg_color=self.colors['accent'],
+                          hover_color=self.colors['accent_hover']).pack(pady=(10, 5), padx=20, fill="x")
+            ctk.CTkButton(dialog, text="Cancel", command=cancel, fg_color="gray", hover_color="darkgray").pack(
+                pady=(5, 10), padx=20, fill="x")
+
+            dialog.protocol("WM_DELETE_WINDOW", cancel)
+            # This blocks the mainloop for this dialog, but the calling thread is already blocked by _gui_event.wait()
+            # We don't need root.wait_window here.
+
+        self.root.after(0, show_input_dialog)  # Schedule dialog creation in the main thread
+        self._gui_event.wait()  # Block the calling (background) thread
+
+        return self._gui_input_result
 
     # ==================== LOGIN SCREEN ====================
     def show_login_screen(self):
@@ -339,7 +398,7 @@ class TelegramDownloaderGUI:
             border_width=1,
             border_color=self.colors['accent'],
             command=self.handle_logout_and_return
-        ).pack(side="right", padx=(5, 0)) # Thêm padx để có khoảng trống với cạnh phải của header
+        ).pack(side="right", padx=(5, 0))  # Thêm padx để có khoảng trống với cạnh phải của header
 
         # Nút "Continue with Selected" (pack sau với side="right", nó sẽ nằm bên trái của Logout)
         self.continue_selected_btn = ctk.CTkButton(
@@ -350,23 +409,23 @@ class TelegramDownloaderGUI:
             command=self._execute_continue_selected_from_header
         )
         # Pack với side="right" và padx để tạo khoảng cách với nút Logout
-        self.continue_selected_btn.pack(side="right", padx=(0, 10)) # padx=(0, 10) tạo 10px padding bên phải nút này
-        self.continue_selected_btn.pack_forget() # Vẫn ẩn nút theo mặc định
-
+        self.continue_selected_btn.pack(side="right", padx=(0, 10))  # padx=(0, 10) tạo 10px padding bên phải nút này
+        self.continue_selected_btn.pack_forget()  # Vẫn ẩn nút theo mặc định
 
         # Main content frame for two panels
         content_frame = ctk.CTkFrame(self.main_container, fg_color=self.colors['bg'])
         content_frame.pack(fill="both", expand=True)
-        content_frame.grid_columnconfigure(0, weight=1) # Left panel
-        content_frame.grid_columnconfigure(1, weight=3) # Right panel
+        content_frame.grid_columnconfigure(0, weight=1)  # Left panel
+        content_frame.grid_columnconfigure(1, weight=3)  # Right panel
         content_frame.grid_rowconfigure(0, weight=1)
 
         # Left Panel - Source Selection Buttons
         self.left_panel = ctk.CTkFrame(content_frame, fg_color=self.colors['card'], corner_radius=10)
         self.left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10), pady=0)
-        self.left_panel.grid_rowconfigure(5, weight=1) # Makes sure buttons stay at top
+        self.left_panel.grid_rowconfigure(5, weight=1)  # Makes sure buttons stay at top
 
-        ctk.CTkLabel(self.left_panel, text="SOURCES", font=ctk.CTkFont(size=16, weight="bold"), text_color=self.colors['text']).pack(pady=(15, 10))
+        ctk.CTkLabel(self.left_panel, text="SOURCES", font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=self.colors['text']).pack(pady=(15, 10))
 
         # Buttons for source selection (these will trigger right panel updates)
         self.source_buttons = {}
@@ -380,7 +439,7 @@ class TelegramDownloaderGUI:
             btn = ctk.CTkButton(
                 self.left_panel,
                 text=text,
-                fg_color="transparent", # Initial state, or can be self.colors['card']
+                fg_color="transparent",  # Initial state, or can be self.colors['card']
                 hover_color=color,
                 border_width=2,
                 border_color=color,
@@ -392,14 +451,17 @@ class TelegramDownloaderGUI:
         # Right Panel - Dynamic Content
         self.right_panel = ctk.CTkScrollableFrame(content_frame, fg_color=self.colors['card'], corner_radius=10)
         self.right_panel.grid(row=0, column=1, sticky="nsew", padx=(10, 0), pady=0)
-        self.right_panel.grid_columnconfigure(0, weight=1) # Allow content in right panel to expand
+        self.right_panel.grid_columnconfigure(0, weight=1)  # Allow content in right panel to expand
 
-        self._show_default_right_panel() # Initial content for the right panel
+        self._show_default_right_panel()  # Initial content for the right panel
 
     def _clear_right_panel(self):
         """Clears all widgets from the right panel."""
         for widget in self.right_panel.winfo_children():
             widget.destroy()
+        # Ensure _scan_progress_label is reset
+        if hasattr(self, '_scan_progress_label'):
+            del self._scan_progress_label
 
     def _show_default_right_panel(self):
         """Displays a default message in the right panel."""
@@ -409,7 +471,7 @@ class TelegramDownloaderGUI:
             text="Select a source from the left panel to begin.",
             font=ctk.CTkFont(size=14),
             text_color=self.colors['text_dim'],
-            wraplength=500 # Fixed wraplength to prevent AttributeError
+            wraplength=500  # Fixed wraplength to prevent AttributeError
         ).pack(expand=True, padx=20, pady=50)
 
     def _select_source_in_panel(self, source_type: str):
@@ -419,8 +481,8 @@ class TelegramDownloaderGUI:
 
         # Ẩn nút "Continue with Selected" ở header khi chuyển đổi nguồn
         if self.continue_selected_btn:
-            self.continue_selected_btn.pack_forget() # Ẩn nút
-            self.continue_selected_btn.configure(state="disabled") # Vô hiệu hóa nút
+            self.continue_selected_btn.pack_forget()  # Ẩn nút
+            self.continue_selected_btn.configure(state="disabled")  # Vô hiệu hóa nút
 
         # Reset button colors and highlight the selected one
         for btn_type, btn_widget in self.source_buttons.items():
@@ -439,8 +501,10 @@ class TelegramDownloaderGUI:
             self._display_continue_last_options_panel()
 
     def _display_saved_messages_options_panel(self):
-        ctk.CTkLabel(self.right_panel, text="Saved Messages", font=ctk.CTkFont(size=18, weight="bold"), text_color=self.colors['text']).pack(pady=(20, 10))
-        ctk.CTkLabel(self.right_panel, text="Download media from your personal 'Saved Messages' chat.", text_color=self.colors['text_dim'], wraplength=400).pack(pady=(0, 20))
+        ctk.CTkLabel(self.right_panel, text="Saved Messages", font=ctk.CTkFont(size=18, weight="bold"),
+                     text_color=self.colors['text']).pack(pady=(20, 10))
+        ctk.CTkLabel(self.right_panel, text="Download media from your personal 'Saved Messages' chat.",
+                     text_color=self.colors['text_dim'], wraplength=400).pack(pady=(0, 20))
         ctk.CTkButton(
             self.right_panel,
             text="Scan Saved Messages & Continue",
@@ -450,8 +514,10 @@ class TelegramDownloaderGUI:
         ).pack(pady=10)
 
     def _display_all_dialogs_options_panel(self):
-        ctk.CTkLabel(self.right_panel, text="All Dialogs", font=ctk.CTkFont(size=18, weight="bold"), text_color=self.colors['text']).pack(pady=(20, 10))
-        ctk.CTkLabel(self.right_panel, text="Scan and download media from ALL chats and channels you are part of.", text_color=self.colors['text_dim'], wraplength=400).pack(pady=(0, 20))
+        ctk.CTkLabel(self.right_panel, text="All Dialogs", font=ctk.CTkFont(size=18, weight="bold"),
+                     text_color=self.colors['text']).pack(pady=(20, 10))
+        ctk.CTkLabel(self.right_panel, text="Scan and download media from ALL chats and channels you are part of.",
+                     text_color=self.colors['text_dim'], wraplength=400).pack(pady=(0, 20))
         ctk.CTkButton(
             self.right_panel,
             text="Scan All Dialogs & Continue",
@@ -461,21 +527,24 @@ class TelegramDownloaderGUI:
         ).pack(pady=10)
 
     def _display_continue_last_options_panel(self):
-        ctk.CTkLabel(self.right_panel, text="Continue Last Session", font=ctk.CTkFont(size=18, weight="bold"), text_color=self.colors['text']).pack(pady=(20, 10))
+        ctk.CTkLabel(self.right_panel, text="Continue Last Session", font=ctk.CTkFont(size=18, weight="bold"),
+                     text_color=self.colors['text']).pack(pady=(20, 10))
         if not self.downloader:
             messagebox.showerror("Error", "Downloader not initialized.")
             return
 
         state_data = self.downloader.state.state
         if not state_data or not state_data.get("source", {}).get("type"):
-            ctk.CTkLabel(self.right_panel, text="No previous session found.", text_color=self.colors['error']).pack(pady=10)
+            ctk.CTkLabel(self.right_panel, text="No previous session found.", text_color=self.colors['error']).pack(
+                pady=10)
             return
 
         info_frame = ctk.CTkFrame(self.right_panel, fg_color=self.colors['bg'], corner_radius=8)
         info_frame.pack(fill="x", padx=20, pady=10)
 
         # Display last session details
-        ctk.CTkLabel(info_frame, text="Last Session Details:", font=ctk.CTkFont(weight="bold"), text_color=self.colors['text']).pack(anchor="w", padx=10, pady=(10, 5))
+        ctk.CTkLabel(info_frame, text="Last Session Details:", font=ctk.CTkFont(weight="bold"),
+                     text_color=self.colors['text']).pack(anchor="w", padx=10, pady=(10, 5))
         for line_text in self.downloader.state.get_status_lines():
             ctk.CTkLabel(info_frame, text=line_text, text_color=self.colors['text_dim']).pack(anchor="w", padx=20)
 
@@ -488,8 +557,10 @@ class TelegramDownloaderGUI:
         ).pack(pady=20)
 
     def _display_select_dialogs_options_panel(self):
-        ctk.CTkLabel(self.right_panel, text="Select Dialogs", font=ctk.CTkFont(size=18, weight="bold"), text_color=self.colors['text']).pack(pady=(20, 10))
-        ctk.CTkLabel(self.right_panel, text="Choose specific chats or channels to download media from.", text_color=self.colors['text_dim'], wraplength=400).pack(pady=(0, 20))
+        ctk.CTkLabel(self.right_panel, text="Select Dialogs", font=ctk.CTkFont(size=18, weight="bold"),
+                     text_color=self.colors['text']).pack(pady=(20, 10))
+        ctk.CTkLabel(self.right_panel, text="Choose specific chats or channels to download media from.",
+                     text_color=self.colors['text_dim'], wraplength=400).pack(pady=(0, 20))
         ctk.CTkButton(
             self.right_panel,
             text="Fetch Dialogs",
@@ -499,8 +570,6 @@ class TelegramDownloaderGUI:
         ).pack(pady=10)
 
     # ==================== DIALOGS SELECTION SCREEN (Adapted for Panel) ====================
-    # show_dialogs_screen is no longer directly called as a full screen
-    # Its logic is now integrated into _initiate_dialog_fetch and _display_dialogs_in_panel
 
     def _initiate_dialog_fetch(self):
         """Initiates fetching dialogs, showing a loading message in the right panel."""
@@ -514,8 +583,10 @@ class TelegramDownloaderGUI:
             self.right_panel,
             text="Loading dialogs...",
             font=ctk.CTkFont(size=14),
-            text_color=self.colors['text_dim']
+            text_color=self.colors['text_dim'],
+            justify="center"  # Add justify to center the text properly
         ).pack(pady=50, expand=True)
+
         threading.Thread(target=self._fetch_dialogs_thread_for_panel, daemon=True).start()
 
     def _fetch_dialogs_thread_for_panel(self):
@@ -526,39 +597,20 @@ class TelegramDownloaderGUI:
                 raise RuntimeError("Active event loop is not available for fetching dialogs.")
 
             asyncio.set_event_loop(loop)
-            dialogs = loop.run_until_complete(self._fetch_dialogs_async())
-            self.all_dialogs_info = dialogs # Store all dialogs
+            # Call downloader's list_dialogs method
+            dialogs = loop.run_until_complete(self.downloader.list_dialogs())
+            self.all_dialogs_info = dialogs  # Store all dialogs
 
             # Update UI in main thread with the fetched dialogs
             self.root.after(0, lambda d=dialogs: self._display_dialogs_in_panel(d))
         except Exception as e:
             error_msg = f"Failed to fetch dialogs: {str(e)}"
             self.root.after(0, lambda msg=error_msg: self._show_error(msg))
-
-    async def _fetch_dialogs_async(self):
-        """Fetch dialogs via Telethon"""
-        # Downloader is checked in _initiate_dialog_fetch
-        dialogs = []
-        idx = 0
-        async for d in self.downloader.client.iter_dialogs():
-            entity = d.entity
-            etype = entity.__class__.__name__
-            title = (getattr(d, "name", None) or getattr(entity, "title", None)
-                     or getattr(entity, "first_name", None) or "Unknown").strip()
-            idx += 1
-            dialogs.append({
-                "index": idx,
-                "dialog": d,
-                "entity": entity,
-                "title": title,
-                "type": etype,
-            })
-
-        return dialogs
+            self.root.after(0, self.show_source_screen)  # Go back to source selection on error
 
     def _display_dialogs_in_panel(self, dialogs):
         """Hiển thị danh sách dialogs TRONG right_panel"""
-        self._clear_right_panel() # Clear the right panel only
+        self._clear_right_panel()  # Clear the right panel only
 
         # Header for the dialog selection in the right panel
         ctk.CTkLabel(
@@ -610,9 +662,8 @@ class TelegramDownloaderGUI:
 
         # Hiển thị nút "Continue with Selected" ở header
         if self.continue_selected_btn:
-            self.continue_selected_btn.pack(side="right", padx=(0, 10)) # Đảm bảo nó được pack lại
-            self.continue_selected_btn.configure(state="normal") # Bật nút
-
+            self.continue_selected_btn.pack(side="right", padx=(0, 10))  # Đảm bảo nó được pack lại
+            self.continue_selected_btn.configure(state="normal")  # Bật nút
 
     def _render_dialog_list_in_panel(self, dialogs_to_display: List[Dict[str, Any]], target_frame):
         """Renders the dialog list within a given target frame."""
@@ -620,12 +671,19 @@ class TelegramDownloaderGUI:
         for widget in target_frame.winfo_children():
             widget.destroy()
 
-        self.dialog_checkboxes = [] # Reset for new render
+        self.dialog_checkboxes = []  # Reset for new render
         for dialog in dialogs_to_display:
-            dialog_frame = ctk.CTkFrame(target_frame, fg_color=self.colors['bg']) # Changed to bg for better contrast in a card-like panel
-            dialog_frame.pack(fill="x", pady=2, padx=2) # Reduced padding for denser list
+            dialog_frame = ctk.CTkFrame(target_frame, fg_color=self.colors[
+                'bg'])  # Changed to bg for better contrast in a card-like panel
+            dialog_frame.pack(fill="x", pady=2, padx=2)  # Reduced padding for denser list
 
             var = ctk.IntVar()
+            # If dialog was previously selected and is still in self.selected_dialogs (entities), keep it checked
+            if self.selected_dialogs and any(
+                    hasattr(s, 'id') and s.id == dialog['entity'].id for s in self.selected_dialogs
+            ):
+                var.set(1)
+
             checkbox = ctk.CTkCheckBox(
                 dialog_frame,
                 text="",
@@ -635,7 +693,7 @@ class TelegramDownloaderGUI:
                 fg_color=self.colors['accent'],
                 hover_color=self.colors['accent_hover']
             )
-            checkbox.pack(side="left", padx=10, pady=5) # Reduced pady
+            checkbox.pack(side="left", padx=10, pady=5)  # Reduced pady
 
             info_frame = ctk.CTkFrame(dialog_frame, fg_color="transparent")
             info_frame.pack(side="left", fill="both", expand=True)
@@ -650,7 +708,7 @@ class TelegramDownloaderGUI:
 
             ctk.CTkLabel(
                 info_frame,
-                text=f"Type: {dialog['type']}",
+                text=f"Type: {dialog['etype']}",  # Changed to etype from type
                 font=ctk.CTkFont(size=10),
                 text_color=self.colors['text_dim'],
                 anchor="w"
@@ -664,7 +722,7 @@ class TelegramDownloaderGUI:
         if search_term:
             filtered_dialogs = [
                 d for d in self.all_dialogs_info
-                if search_term in d['title'].lower() or search_term in d['type'].lower()
+                if search_term in d['title'].lower() or search_term in d['etype'].lower()  # Changed to etype
             ]
         else:
             filtered_dialogs = self.all_dialogs_info
@@ -683,12 +741,11 @@ class TelegramDownloaderGUI:
     def _execute_continue_selected_from_header(self):
         """Xử lý sự kiện khi nút 'Continue with Selected' ở header được nhấn."""
         if self.current_screen == "source" and self.current_source_type == "dialogs":
-            self._continue_with_selected_dialogs_from_panel(self.all_dialogs_info)
+            self._continue_with_selected_dialogs_from_panel()
         else:
             messagebox.showerror("Lỗi", "Nút này chỉ khả dụng khi chọn 'Select Dialogs'.")
 
-
-    def _continue_with_selected_dialogs_from_panel(self, dialogs):
+    def _continue_with_selected_dialogs_from_panel(self):
         """Tiếp tục với dialogs đã chọn (sau khi hiển thị trong panel)"""
         selected = [d for var, d in self.dialog_checkboxes if var.get() == 1]
 
@@ -697,7 +754,7 @@ class TelegramDownloaderGUI:
             return
 
         self.selected_dialogs = [d['entity'] for d in selected]
-        self._initiate_scan(self.current_source_type) # Initiate scan now
+        self._initiate_scan(self.current_source_type)  # Initiate scan now
 
     # ==================== FILTER SCREEN ====================
     def show_filter_screen(self):
@@ -722,7 +779,7 @@ class TelegramDownloaderGUI:
             fg_color=self.colors['card'],
             border_width=1,
             border_color=self.colors['accent'],
-            command=self.show_source_screen # Go back to the split source screen
+            command=self.show_source_screen  # Go back to the split source screen
         ).pack(side="right")
 
         # Đảm bảo nút "Continue with Selected" ở header bị ẩn khi chuyển sang màn hình filter
@@ -743,7 +800,7 @@ class TelegramDownloaderGUI:
         self._create_stat_box(stats_grid, 2, str(self.stats['total_found']), "Total", "#2ecc71")
 
         # Size calculation
-        size_str = self._format_size(self.stats['total_size'])
+        size_str = humanize.naturalsize(self.stats['total_size'])  # Use humanize
         self._create_stat_box(stats_grid, 3, size_str, "Size", "#e67e22")
 
         # Spacer
@@ -910,7 +967,7 @@ class TelegramDownloaderGUI:
             height=150
         )
         self.log_textbox.pack(fill="both", expand=True, padx=15, pady=(0, 15))
-        self.log_textbox.configure(state="disabled") # Make it read-only
+        self.log_textbox.configure(state="disabled")  # Make it read-only
 
     def _create_download_stat_box(self, parent, col, value, label, color, key):
         """Tạo stat box cho download screen"""
@@ -951,7 +1008,7 @@ class TelegramDownloaderGUI:
 
         return card
 
-    def _create_source_card_as_button(self, parent, row, col, title, subtitle, color, command): # Renamed
+    def _create_source_card_as_button(self, parent, row, col, title, subtitle, color, command):  # Renamed
         """Tạo card cho source selection (đã chuyển thành nút hành động)"""
         card = ctk.CTkFrame(
             parent,
@@ -1003,33 +1060,33 @@ class TelegramDownloaderGUI:
             text_color=self.colors['text_dim']
         ).pack(pady=(0, 15))
 
-    def _format_size(self, size_bytes):
-        """Format bytes thành human readable"""
-        if size_bytes == 0:
-            return "0 B"
-        units = ['B', 'KB', 'MB', 'GB', 'TB']
-        i = 0
-        size = float(size_bytes)
-        while size >= 1024 and i < len(units) - 1:
-            size /= 1024
-            i += 1
-        return f"{size:.1f} {units[i]}"
-
     def _show_error(self, message):
         """Hiển thị error message"""
         messagebox.showerror("Error", message)
-        self.show_login_screen()  # Fallback to login screen on error
 
     def _append_log(self, message: str, color: Optional[str] = None):
         """Appends a message to the download log textbox."""
+        # This function is called via root.after from gui_log_output
         if self.current_screen == "download" and hasattr(self, 'log_textbox'):
             self.log_textbox.configure(state="normal")
-            if color:
-                self.log_textbox.insert("end", f"{message}\n", color)
+            if color == "red":
+                self.log_textbox.insert("end", f"{message}\n", "red_tag")
+                self.log_textbox.tag_config("red_tag", foreground=self.colors['error'])
+            elif color == "yellow":
+                self.log_textbox.insert("end", f"{message}\n", "yellow_tag")
+                self.log_textbox.tag_config("yellow_tag", foreground=self.colors['warning'])
+            elif color == "green":
+                self.log_textbox.insert("end", f"{message}\n", "green_tag")
+                self.log_textbox.tag_config("green_tag", foreground=self.colors['success'])
+            elif color == "blue":
+                self.log_textbox.insert("end", f"{message}\n", "blue_tag")
+                self.log_textbox.tag_config("blue_tag", foreground=self.colors['accent'])
             else:
                 self.log_textbox.insert("end", f"{message}\n")
-            self.log_textbox.see("end") # Scroll to bottom
+            self.log_textbox.see("end")  # Scroll to bottom
             self.log_textbox.configure(state="disabled")
+        else:  # Fallback if log_textbox not visible or not in download screen
+            print(f"[LOG]: {message}")  # Print to console if GUI log not available
 
     # ==================== EVENT HANDLERS ====================
     def browse_directory(self):
@@ -1039,7 +1096,7 @@ class TelegramDownloaderGUI:
             self.download_dir_entry.insert(0, directory)
 
     def handle_login(self):
-        """Xử lý login và lưu account mới"""
+        """Xử lý login và lưu account mới, sử dụng do_login_flow từ downloader.py"""
         phone = self.phone_entry.get().strip()
         api_id = self.api_id_entry.get().strip()
         api_hash = self.api_hash_entry.get().strip()
@@ -1055,24 +1112,36 @@ class TelegramDownloaderGUI:
             messagebox.showerror("Invalid API ID", "API ID must be a number!")
             return
 
-        # Tìm index mới
-        existing_idxs = [int(k.split("_")[1]) for k in self.envd.keys()
-                         if k.startswith("ACCOUNT_") and k.endswith("_PHONE") and k.split("_")[1].isdigit()]
+        # Prepare a mock envd for do_login_flow
+        current_accounts_in_envd = self.envd.copy()
+
+        # Manually construct a potential new account config for do_login_flow
+        # We need to find the next available index first, as do_login_flow uses pick_account_index internally
+        existing_idxs = sorted({int(k.split("_")[1]) for k in current_accounts_in_envd.keys()
+                                if k.startswith("ACCOUNT_") and k.endswith("_PHONE") and k.split("_")[1].isdigit()})
         new_idx = 1 if not existing_idxs else max(existing_idxs) + 1
 
-        # Lưu vào envd
+        # Populate with current GUI inputs for the *new* account flow
+        current_accounts_in_envd[f"ACCOUNT_{new_idx}_PHONE"] = phone
+        current_accounts_in_envd[f"ACCOUNT_{new_idx}_API_ID"] = str(api_id_int)
+        current_accounts_in_envd[f"ACCOUNT_{new_idx}_API_HASH"] = api_hash
+        current_accounts_in_envd[f"ACCOUNT_{new_idx}_DOWNLOAD_DIR"] = download_dir
+
+        # Simulate do_login_flow's logic to set the new account index.
+        # do_login_flow has interactive parts, but here we've pre-filled.
+        # We assume for 'add new account' scenario, we don't pick existing, but create new.
+        # This part of do_login_flow is more geared towards console multi-account selection.
+        # For GUI 'Add New Account', we directly add and set current.
+
         self.envd[f"ACCOUNT_{new_idx}_PHONE"] = phone
         self.envd[f"ACCOUNT_{new_idx}_API_ID"] = str(api_id_int)
         self.envd[f"ACCOUNT_{new_idx}_API_HASH"] = api_hash
         self.envd[f"ACCOUNT_{new_idx}_DOWNLOAD_DIR"] = download_dir
         self.envd = set_current_account_index(self.envd, new_idx)
 
-        # Save to file
         save_env(self.env_path, self.envd)
-
         self.current_account_idx = new_idx
 
-        # Tạo downloader và connect trong thread
         self._init_downloader_and_connect()
 
     def _init_downloader_and_connect(self):
@@ -1105,266 +1174,28 @@ class TelegramDownloaderGUI:
     def _connect_thread(self, cfg: Dict[str, str], loop_to_use: asyncio.AbstractEventLoop):
         """Connect to Telegram trong background thread"""
         try:
-            # Set the event loop for this thread
             asyncio.set_event_loop(loop_to_use)
 
-            # Instantiate the TelegramDownloader, it will create its client internally
             self.downloader = TelegramDownloader(
                 api_id=int(cfg["API_ID"]),
                 api_hash=cfg["API_HASH"],
                 phone=cfg["PHONE"],
                 download_dir=cfg["DOWNLOAD_DIR"],
-                account_index=self.current_account_idx
+                account_index=self.current_account_idx,
+                log_func=self.gui_log_output,  # Provide GUI log function
+                input_func=self.gui_get_input  # Provide GUI input function
             )
 
-            # Connect the client using the provided event loop
-            is_connected, status_code = loop_to_use.run_until_complete(self._connect_client_with_status())
-
-            if is_connected:
-                if status_code == "success":
-                    self.root.after(0, self.show_source_screen)
-                elif status_code == "need_code":
-                    self.root.after(0, self._show_otp_dialog)
-            # If not connected, error message would have been shown by _connect_client_with_status
+            # Call the connection logic from the downloader instance
+            if loop_to_use.run_until_complete(self.downloader.connect_client()):
+                self.root.after(0, self.show_source_screen)
             else:
-                self.root.after(0, self.show_login_screen)  # Return to login if connection fails
+                self.root.after(0, self.show_login_screen)  # If connect_client fails, return to login
 
         except Exception as e:
             error_msg = f"Connection error: {str(e)}\n\nMake sure your API credentials are correct or check your network."
             self.root.after(0, lambda msg=error_msg: self._show_error(msg))
-
-    async def _connect_client_with_status(self) -> Tuple[bool, str]:
-        """Async function to connect client and return status"""
-        if not self.downloader:
-            self.root.after(0, lambda: messagebox.showerror("Error", "Downloader not initialized."))
-            return False, "error"
-        try:
-            await self.downloader.client.connect()
-            if not await self.downloader.client.is_user_authorized():
-                try:
-                    await self.downloader.client.send_code_request(self.downloader.phone)
-                    return True, "need_code"
-                except FloodWaitError as e:
-                    self.root.after(0, lambda: messagebox.showerror("Connection Error",
-                                                                    f"Too many attempts. Please wait {e.seconds} seconds before trying again."))
-                    await self.downloader.client.disconnect()  # Disconnect on flood wait
-                    return False, "flood_wait"
-            else:
-                return True, "success"
-        except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("Connection Error",
-                                                            f"Failed to connect: {e}\nPlease check your network or API credentials."))
-            try:
-                if self.downloader.client.is_connected():
-                    await self.downloader.client.disconnect()
-            except Exception:
-                pass  # Ignore errors during disconnect attempt
-            return False, f"error: {str(e)}"
-
-    def _show_otp_dialog(self):
-        """Hiển thị dialog nhập OTP"""
-        self.clear_screen()
-
-        ctk.CTkLabel(
-            self.main_container,
-            text="Verification Required",
-            font=ctk.CTkFont(size=20, weight="bold"),
-            text_color=self.colors['accent']
-        ).pack(pady=(50, 20))
-
-        ctk.CTkLabel(
-            self.main_container,
-            text="Enter the code sent to your Telegram app",
-            font=ctk.CTkFont(size=12),
-            text_color=self.colors['text_dim']
-        ).pack(pady=10)
-
-        # OTP Entry
-        otp_frame = ctk.CTkFrame(self.main_container, fg_color=self.colors['card'])
-        otp_frame.pack(pady=20, padx=100, fill="x")
-
-        self.otp_entry = ctk.CTkEntry(
-            otp_frame,
-            placeholder_text="12345",
-            font=ctk.CTkFont(size=16),
-            justify="center",
-            fg_color=self.colors['bg'],
-            border_color=self.colors['accent']
-        )
-        self.otp_entry.pack(pady=20, padx=20, fill="x")
-
-        # Submit button
-        ctk.CTkButton(
-            otp_frame,
-            text="Verify",
-            height=40,
-            fg_color=self.colors['accent'],
-            hover_color=self.colors['accent_hover'],
-            command=self._submit_otp
-        ).pack(pady=(0, 20), padx=20, fill="x")
-
-        # 2FA info
-        ctk.CTkLabel(
-            self.main_container,
-            text="If you have 2FA enabled, you'll be asked for password next",
-            font=ctk.CTkFont(size=10),
-            text_color=self.colors['text_dim']
-        ).pack(pady=10)
-
-    def _submit_otp(self):
-        """Submit OTP code"""
-        code = self.otp_entry.get().strip()
-        if not code:
-            messagebox.showwarning("Missing Code", "Please enter the verification code")
-            return
-
-        # Show loading
-        self.clear_screen()
-        ctk.CTkLabel(
-            self.main_container,
-            text="Verifying...",
-            font=ctk.CTkFont(size=14),
-            text_color=self.colors['text_dim']
-        ).pack(pady=50)
-
-        threading.Thread(
-            target=self._verify_otp_thread,
-            args=(code,),
-            daemon=True
-        ).start()
-
-    def _verify_otp_thread(self, code):
-        """Verify OTP trong background"""
-        try:
-            loop = self.active_loop
-            if loop is None or loop.is_closed():
-                raise RuntimeError("Active event loop is not available for OTP verification.")
-            asyncio.set_event_loop(loop)
-
-            async def sign_in():
-                try:
-                    cfg = get_account_config(self.envd, self.current_account_idx)
-                    await self.downloader.client.sign_in(cfg["PHONE"], code)
-                    return "success"
-                except SessionPasswordNeededError:
-                    return "need_password"
-                except PhoneCodeInvalidError:
-                    return "invalid_code"
-                except PhoneCodeExpiredError:  # Handle expired code
-                    return "expired_code"
-                except Exception as e:
-                    raise e
-
-            result = loop.run_until_complete(sign_in())
-
-            if result == "need_password":
-                self.root.after(0, self._show_2fa_dialog)
-            elif result == "success":
-                self.root.after(0, self.show_source_screen)
-            elif result == "invalid_code":
-                error_msg = "Invalid verification code. Please try again."
-                self.root.after(0, lambda msg=error_msg: messagebox.showerror("Error", msg))
-                self.root.after(100, self._show_otp_dialog)
-            elif result == "expired_code":  # Handle expired code in UI
-                error_msg = "Verification code has expired. Please request a new one."
-                self.root.after(0, lambda msg=error_msg: messagebox.showerror("Error", msg))
-                self.root.after(100, self.show_login_screen)  # Go back to login to re-send code
-
-        except Exception as e:
-            error_msg = f"Verification failed: {str(e)}"
-            self.root.after(0, lambda msg=error_msg: self._show_error(msg))
-
-    def _show_2fa_dialog(self):
-        """Hiển thị dialog nhập 2FA password"""
-        self.clear_screen()
-
-        ctk.CTkLabel(
-            self.main_container,
-            text="Two-Factor Authentication",
-            font=ctk.CTkFont(size=20, weight="bold"),
-            text_color=self.colors['accent']
-        ).pack(pady=(50, 20))
-
-        ctk.CTkLabel(
-            self.main_container,
-            text="Enter your 2FA password",
-            font=ctk.CTkFont(size=12),
-            text_color=self.colors['text_dim']
-        ).pack(pady=10)
-
-        # Password Entry
-        pw_frame = ctk.CTkFrame(self.main_container, fg_color=self.colors['card'])
-        pw_frame.pack(pady=20, padx=100, fill="x")
-
-        self.password_entry = ctk.CTkEntry(
-            pw_frame,
-            placeholder_text="Password",
-            show="*",
-            font=ctk.CTkFont(size=16),
-            fg_color=self.colors['bg'],
-            border_color=self.colors['accent']
-        )
-        self.password_entry.pack(pady=20, padx=20, fill="x")
-
-        ctk.CTkButton(
-            pw_frame,
-            text="Submit",
-            height=40,
-            fg_color=self.colors['accent'],
-            hover_color=self.colors['accent_hover'],
-            command=self._submit_2fa
-        ).pack(pady=(0, 20), padx=20, fill="x")
-
-    def _submit_2fa(self):
-        """Submit 2FA password"""
-        password = self.password_entry.get().strip()
-        if not password:
-            messagebox.showwarning("Missing Password", "Please enter your 2FA password")
-            return
-
-        self.clear_screen()
-        ctk.CTkLabel(
-            self.main_container,
-            text="Verifying...",
-            font=ctk.CTkFont(size=14),
-            text_color=self.colors['text_dim']
-        ).pack(pady=50)
-
-        threading.Thread(
-            target=self._verify_2fa_thread,
-            args=(password,),
-            daemon=True
-        ).start()
-
-    def _verify_2fa_thread(self, password):
-        """Verify 2FA trong background"""
-        try:
-            loop = self.active_loop
-            if loop is None or loop.is_closed():
-                raise RuntimeError("Active event loop is not available for 2FA verification.")
-            asyncio.set_event_loop(loop)
-
-            async def sign_in_2fa():
-                try:
-                    await self.downloader.client.sign_in(password=password)
-                    return "success"
-                except PasswordHashInvalidError:
-                    return "invalid_password"
-                except Exception as e:
-                    raise e
-
-            result = loop.run_until_complete(sign_in_2fa())
-
-            if result == "success":
-                self.root.after(0, self.show_source_screen)
-            elif result == "invalid_password":
-                error_msg = "Invalid 2FA password. Please try again."
-                self.root.after(0, lambda msg=error_msg: messagebox.showerror("Error", msg))
-                self.root.after(100, self._show_2fa_dialog)
-
-        except Exception as e:
-            error_msg = f"2FA verification failed: {str(e)}"
-            self.root.after(0, lambda msg=error_msg: self._show_error(msg))
+            self.root.after(0, self.show_login_screen)
 
     def select_account(self, idx):
         """Chọn account có sẵn"""
@@ -1381,7 +1212,9 @@ class TelegramDownloaderGUI:
             return
 
         if messagebox.askyesno("Confirm Logout", f"Logout account #{self.current_account_idx}?"):
-            purge_session_files_for(self.current_account_idx)
+            # Use do_logout_flow from downloader.py
+            threading.Thread(target=lambda: asyncio.run(do_logout_flow(self.envd, self.gui_log_output)),
+                             daemon=True).start()
             self.current_account_idx = 0  # Reset current account
             self.envd = set_current_account_index(self.envd, 0)
             save_env(self.env_path, self.envd)
@@ -1392,6 +1225,13 @@ class TelegramDownloaderGUI:
     def handle_logout_and_return(self):
         """Logout và quay về login screen"""
         if messagebox.askyesno("Confirm", "Logout and return to login screen?"):
+            # Use do_logout_flow from downloader.py
+            if self.downloader:  # Only if downloader was initialized for current account
+                threading.Thread(target=lambda: asyncio.run(do_logout_flow(self.envd, self.gui_log_output)),
+                                 daemon=True).start()
+                self.envd = set_current_account_index(self.envd, 0)
+                save_env(self.env_path, self.envd)
+
             self._disconnect_and_close_loop()
             self.show_login_screen()
 
@@ -1399,7 +1239,8 @@ class TelegramDownloaderGUI:
         """Reset .env file"""
         if messagebox.askyesno("Confirm Reset",
                                "Reset all config? This will delete all account info and saved sessions!"):
-            self.envd = {"CURRENT_ACCOUNT": "0"}
+            # Use do_reset_flow from downloader.py
+            self.envd = do_reset_flow(self.gui_get_input, self.gui_log_output)
             save_env(self.env_path, self.envd)
             # Purge all session files
             try:
@@ -1409,14 +1250,27 @@ class TelegramDownloaderGUI:
                         if f.is_file() and f.name.startswith("session_"):
                             f.unlink()
             except Exception as e:
-                print(f"Error purging session files: {e}")
+                self.gui_log_output(f"Error purging session files: {e}", "red")
 
             messagebox.showinfo("Reset", "Config and all session files have been reset!")
             self._disconnect_and_close_loop()  # Ensure resources are cleaned up
             self.show_login_screen()
 
-    # The original select_source method is no longer used for direct GUI clicks
-    # Its logic is now distributed among _select_source_in_panel and _initiate_X methods.
+    def _update_scan_progress_callback(self, current: int, total: Optional[int]):
+        """Callback for scan progress updates."""
+        if self.current_screen == "source" and hasattr(self, 'right_panel'):
+            scan_progress_label = getattr(self, '_scan_progress_label', None)
+            if not scan_progress_label:
+                # This state shouldn't happen often if _initiate_scan sets it up
+                # But as a fallback, ensure the label exists or create it.
+                self.root.after(0, lambda: self.gui_log_output(f"Scan progress: {current} messages processed.", "blue"))
+                return
+
+            # Update label text directly from the main thread via after()
+            self.root.after(0, lambda: scan_progress_label.configure(
+                text=f"Scanning... {current} messages processed." if total is None else f"Scanning complete. Found {self.downloader.stats['total_found']} media in {current} messages."
+            ))
+        self.root.update_idletasks()  # Ensure UI updates immediately
 
     def _initiate_scan(self, source_type: str):
         """Initiates scanning, showing a loading message in the right panel."""
@@ -1425,21 +1279,46 @@ class TelegramDownloaderGUI:
             self.show_login_screen()
             return
 
-        self.current_source_type = source_type # Ensure current_source_type is set
+        self.current_source_type = source_type  # Ensure current_source_type is set
 
         self._clear_right_panel()
-        ctk.CTkLabel(
+        self._scan_progress_label = ctk.CTkLabel(  # Create label for scan progress
             self.right_panel,
-            text=f"Scanning media from {len(self.selected_dialogs)} source(s)...",
+            text=f"Scanning media from {source_type}...",
             font=ctk.CTkFont(size=14),
-            text_color=self.colors['text_dim']
-        ).pack(pady=50, expand=True)
+            text_color=self.colors['text_dim'],
+            justify="center"
+        )
+        self._scan_progress_label.pack(pady=50, expand=True)
 
         if source_type == "saved":
-            self.selected_dialogs = ['me'] # Ensure 'me' is set for saved messages scan
-        # For 'all' and 'dialogs', self.selected_dialogs should be populated by previous steps
+            self.selected_dialogs = ['me']  # Ensure 'me' is set for saved messages scan
+        elif source_type == "all":
+            # For "all", we need to fetch all dialogs first if not already done
+            threading.Thread(target=self._fetch_all_dialogs_and_scan_thread, daemon=True).start()
+            return
+        # For 'dialogs', self.selected_dialogs should be populated by previous steps
 
         threading.Thread(target=self._scan_media_thread_for_panel, daemon=True).start()
+
+    def _fetch_all_dialogs_and_scan_thread(self):
+        """Fetches all dialogs for 'all' source type and then initiates scan."""
+        try:
+            loop = self.active_loop
+            if loop is None or loop.is_closed():
+                raise RuntimeError("Active event loop is not available.")
+            asyncio.set_event_loop(loop)
+
+            self.root.after(0, lambda: self._scan_progress_label.configure(text="Fetching all dialogs..."))
+            dialogs_info = loop.run_until_complete(self.downloader.list_dialogs())
+            self.all_dialogs_info = dialogs_info
+            self.selected_dialogs = [d['entity'] for d in dialogs_info]
+            self.root.after(0, self._scan_media_thread_for_panel)  # Continue to actual scan
+
+        except Exception as e:
+            error_msg = f"Failed to fetch all dialogs: {str(e)}"
+            self.root.after(0, lambda msg=error_msg: self._show_error(msg))
+            self.root.after(0, self.show_source_screen)
 
     def _scan_media_thread_for_panel(self):
         """Scan media in background, then show filter options screen."""
@@ -1449,22 +1328,52 @@ class TelegramDownloaderGUI:
                 raise RuntimeError("Active event loop is not available for scanning media.")
             asyncio.set_event_loop(loop)
 
+            media_list = []
             if self.selected_dialogs == ['me']:
-                media_list = loop.run_until_complete(self.downloader.scan_saved_messages())
-            else:
                 media_list = loop.run_until_complete(
-                    self.downloader.scan_media_in_dialogs(self.selected_dialogs)
+                    self.downloader.scan_saved_messages(self._update_scan_progress_callback)
                 )
+            else:  # source_type is "dialogs" or "all"
+                if not self.selected_dialogs:
+                    self.root.after(0, lambda: messagebox.showerror("Scan Error", "No dialogs selected for scanning."))
+                    self.root.after(0, self.show_source_screen)
+                    return
 
-            # Don't close loop here, it's the active_loop for the client
+                media_list = loop.run_until_complete(
+                    self.downloader.scan_media_in_dialogs(self.selected_dialogs, self._update_scan_progress_callback)
+                )
 
             self.media_list = media_list
             self.stats = self.downloader.stats.copy()
 
-            self.root.after(0, self.show_filter_screen) # Navigate to a separate filter screen after scan.
+            # Check for hash mismatch if continuing a session or similar
+            # Use the gui_confirm_callback provided to downloader.run_with_source (which is not directly called here)
+            # We'll need a direct call to confirm here if source type implies resumption
+            prev_source_data = self.downloader.state.get_source()
+            if prev_source_data and prev_source_data.get("type") == self.current_source_type:
+                current_ids = [int(m['message'].id) for m in media_list]
+                ids_hash = self.downloader._hash_ids(current_ids)
+                prev_hash = self.downloader.state.state.get("ids_hash", "")
+                if prev_hash and prev_hash != ids_hash:
+                    self.gui_log_output("Media list changed (hash mismatch).", "yellow")
+                    if self._gui_confirm_callback("Confirm Reset Progress",
+                                                  "Media list has changed since last session. Reset progress?"):
+                        self.downloader.state.clear_progress()
+                        self.gui_log_output("Progress reset.", "blue")
+
+            # Update state manager with new scan info
+            dialog_ids_for_state = ['me'] if self.selected_dialogs == ['me'] else [int(getattr(d, 'id', 0)) for d in
+                                                                                   self.selected_dialogs if
+                                                                                   hasattr(d, 'id')]
+            ids_hash = self.downloader._hash_ids([int(m['message'].id) for m in media_list])
+            self.downloader.state.set_source(self.current_source_type, dialog_ids_for_state,
+                                             total_found=len(media_list), ids_hash=ids_hash)
+
+            self.root.after(0, self.show_filter_screen)  # Navigate to a separate filter screen after scan.
         except Exception as e:
             error_msg = f"Scan error: {str(e)}"
             self.root.after(0, lambda msg=error_msg: self._show_error(msg))
+            self.root.after(0, self.show_source_screen)  # Go back to source selection on error
 
     def _initiate_continue_session(self):
         """Restores and attempts to continue the last session."""
@@ -1477,30 +1386,31 @@ class TelegramDownloaderGUI:
 
         if not prev or not prev.get("type"):
             messagebox.showinfo("No Session", "No previous session found to continue.")
-            self._show_default_right_panel() # Go back to default right panel
+            self._show_default_right_panel()  # Go back to default right panel
             return
 
         typ = prev.get("type")
         dialog_ids_from_state = prev.get("dialog_ids", [])
 
-        self.current_source_type = typ # Set source type for continuation
+        self.current_source_type = typ  # Set source type for continuation
 
         self._clear_right_panel()
         ctk.CTkLabel(
             self.right_panel,
             text="Restoring last session...",
             font=ctk.CTkFont(size=14),
-            text_color=self.colors['text_dim']
+            text_color=self.colors['text_dim'],
+            justify="center"
         ).pack(pady=50, expand=True)
-
 
         if typ == "saved":
             self.selected_dialogs = ['me']
             self.root.after(0, lambda: self._initiate_scan("saved"))
-        else: # "dialogs" or "all"
+        else:  # "dialogs" or "all"
             want_ids = [int(x) for x in dialog_ids_from_state if str(x).isdigit() and int(x) != 0]
             if not want_ids:
-                self.root.after(0, lambda: messagebox.showinfo("No Session", "Could not restore dialogs from previous session."))
+                self.root.after(0, lambda: messagebox.showinfo("No Session",
+                                                               "Could not restore dialogs from previous session."))
                 self.root.after(0, self._show_default_right_panel)
                 return
 
@@ -1511,22 +1421,25 @@ class TelegramDownloaderGUI:
                         raise RuntimeError("Active event loop is not available for restoring dialogs.")
                     asyncio.set_event_loop(loop)
 
-                    all_dialogs_info = loop.run_until_complete(self._fetch_dialogs_async())
+                    all_dialogs_from_api = loop.run_until_complete(self.downloader.list_dialogs())
                     restored_entities = []
-                    for d_info in all_dialogs_info:
-                        if int(getattr(d_info["entity"], "id", 0)) in want_ids:
+                    for d_info in all_dialogs_from_api:
+                        if hasattr(d_info["entity"], "id") and int(d_info["entity"].id) in want_ids:
                             restored_entities.append(d_info["entity"])
 
                     if not restored_entities:
-                        self.root.after(0, lambda: messagebox.showinfo("No Session", "Could not restore dialogs from previous session."))
+                        self.root.after(0, lambda: messagebox.showinfo("No Session",
+                                                                       "Could not restore dialogs from previous session."))
                         self.root.after(0, self._show_default_right_panel)
                         return
 
                     self.selected_dialogs = restored_entities
-                    self.root.after(0, lambda: self._initiate_scan(typ)) # Continue with scan after restoring dialogs
+                    self.root.after(0, lambda: self._initiate_scan(typ))  # Continue with scan after restoring dialogs
 
                 except Exception as e:
-                    self.root.after(0, lambda msg=f"Error restoring previous session: {e}": messagebox.showerror("Error", msg))
+                    self.root.after(0,
+                                    lambda msg=f"Error restoring previous session: {e}": messagebox.showerror("Error",
+                                                                                                              msg))
                     self.root.after(0, self._show_default_right_panel)
 
             threading.Thread(target=_restore_dialogs_and_scan_thread, daemon=True).start()
@@ -1555,6 +1468,13 @@ class TelegramDownloaderGUI:
         self.is_downloading = True
         self.stop_flag = False
 
+        # Update state manager with last filter choice
+        dialog_ids_for_state = ['me'] if self.selected_dialogs == ['me'] else [int(getattr(d, 'id', 0)) for d in
+                                                                               self.selected_dialogs if
+                                                                               hasattr(d, 'id')]
+        self.downloader.state.set_source(self.current_source_type, dialog_ids_for_state,
+                                         total_found=len(self.media_list), last_filter=filter_choice)
+
         # Show download screen
         self.show_download_screen()
 
@@ -1568,10 +1488,9 @@ class TelegramDownloaderGUI:
         status_text += f"• Status: Starting..."
 
         self.status_label.configure(text=status_text)
-        self._append_log(f"Download started for {len(self.filtered_media_list)} files.")
-        self._append_log(f"Source: {source_label}, Filter: {filter_label}")
-        self._append_log(f"Download directory: {self.downloader.download_dir}")
-
+        self.gui_log_output(f"Download started for {len(self.filtered_media_list)} files.", "blue")
+        self.gui_log_output(f"Source: {source_label}, Filter: {filter_label}")
+        self.gui_log_output(f"Download directory: {self.downloader.download_dir}")
 
         # Start download thread
         self.download_thread = threading.Thread(target=self._download_thread, daemon=True)
@@ -1585,59 +1504,17 @@ class TelegramDownloaderGUI:
                 raise RuntimeError("Active event loop is not available for downloading.")
             asyncio.set_event_loop(loop)
 
-            total = len(self.filtered_media_list)
+            # Define a stop check function for the downloader
+            def stop_check() -> bool:
+                return self.stop_flag or not self.is_downloading
 
-            for idx, item in enumerate(self.filtered_media_list):
-                if self.stop_flag:
-                    self._append_log("Download stopped by user.", "red")
-                    break
-
-                # Pause handling
-                while not self.is_downloading and not self.stop_flag:
-                    self.root.after(0, lambda: self._append_log("Download paused...", "yellow"))
-                    import time
-                    time.sleep(0.5)
-                    self.root.after(0, lambda: self._append_log("Resuming...", "yellow"))
-
-
-                if self.stop_flag:
-                    self._append_log("Download stopped by user.", "red")
-                    break
-
-                msg = item["message"]
-                target_path = self.downloader._target_path_for(item)
-
-                # Check if already exists
-                if target_path.exists() and os.path.getsize(target_path) > 0:
-                    self.downloader.stats['skipped'] += 1
-                    self.downloader.state.mark_completed(int(msg.id))
-                    self.root.after(0, lambda path=target_path.name: self._append_log(f"Skipped: {path} (already exists)"))
-                else:
-                    try:
-                        self.root.after(0, lambda path=target_path.name: self._append_log(f"Downloading: {path}"))
-                        path = loop.run_until_complete(
-                            self.downloader.client.download_media(msg, file=str(target_path))
-                        )
-                        if path and os.path.exists(path):
-                            size = os.path.getsize(path)
-                            self.downloader.stats['downloaded'] += 1
-                            self.downloader.stats['total_size'] += size
-                            self.downloader.state.mark_completed(int(msg.id))
-                            self.root.after(0, lambda path=target_path.name: self._append_log(f"Downloaded: {path}", "green"))
-                        else:
-                            self.downloader.stats['errors'] += 1
-                            self.root.after(0, lambda path=target_path.name: self._append_log(f"Error downloading: {path}", "red"))
-                    except Exception as e:
-                        self.downloader.stats['errors'] += 1
-                        self.root.after(0, lambda path=target_path.name, err=e: self._append_log(f"Error downloading {path}: {err}", "red"))
-                        print(f"Download error (msg {msg.id}): {e}")  # Log error to console
-
-                # Update UI
-                progress = (idx + 1) / total
-                curr = idx + 1
-                self.root.after(0, lambda p=progress, i=curr, t=total: self._update_download_progress(p, i, t))
-
-            # Don't close loop here, it's the active_loop for the client
+            loop.run_until_complete(
+                self.downloader.download_all_media(
+                    self.filtered_media_list,
+                    stop_flag=stop_check,
+                    progress_callback=lambda p, c, t, s: self.root.after(0, self._update_download_progress, p, c, t, s)
+                )
+            )
 
             # Hoàn thành
             self.root.after(0, self._download_complete)
@@ -1645,9 +1522,10 @@ class TelegramDownloaderGUI:
         except Exception as e:
             error_msg = f"Download thread error: {str(e)}"
             self.root.after(0, lambda msg=error_msg: self._show_error(msg))
+            self.root.after(0, self.show_source_screen)
 
-    def _update_download_progress(self, progress, current, total):
-        """Update download progress trong UI"""
+    def _update_download_progress(self, progress: float, current: int, total: int, stats: Dict[str, Any]):
+        """Update download progress in UI (called from background thread via root.after)."""
         if self.current_screen != "download":
             return
 
@@ -1655,14 +1533,10 @@ class TelegramDownloaderGUI:
         self.progress_label.configure(text=f"{current}/{total}")
 
         # Update stats
-        if 'downloaded' in self.stat_boxes:
-            self.stat_boxes['downloaded'].configure(text=str(self.downloader.stats['downloaded']))
-        if 'skipped' in self.stat_boxes:
-            self.stat_boxes['skipped'].configure(text=str(self.downloader.stats['skipped']))
-        if 'errors' in self.stat_boxes:
-            self.stat_boxes['errors'].configure(text=str(self.downloader.stats['errors']))
-        if 'size' in self.stat_boxes:
-            self.stat_boxes['size'].configure(text=self._format_size(self.downloader.stats['total_size']))
+        self.stat_boxes['downloaded'].configure(text=str(stats['downloaded']))
+        self.stat_boxes['skipped'].configure(text=str(stats['skipped']))
+        self.stat_boxes['errors'].configure(text=str(stats['errors']))
+        self.stat_boxes['size'].configure(text=humanize.naturalsize(stats['total_size']))
 
         # Update status
         source_label = "Saved Messages" if self.selected_dialogs == ['me'] else f"{len(self.selected_dialogs)} dialogs"
@@ -1677,13 +1551,13 @@ class TelegramDownloaderGUI:
 
     def _download_complete(self):
         """Download hoàn thành"""
-        self._append_log("Download session complete.", "blue")
+        self.gui_log_output("Download session complete.", "blue")
         messagebox.showinfo(
             "Download Complete",
             f"Downloaded: {self.downloader.stats['downloaded']}\n"
             f"Skipped: {self.downloader.stats['skipped']}\n"
             f"Errors: {self.downloader.stats['errors']}\n"
-            f"Total size: {self._format_size(self.downloader.stats['total_size'])}"
+            f"Total size: {humanize.naturalsize(self.downloader.stats['total_size'])}"
         )
         self.is_downloading = False
         self.stop_flag = False
@@ -1694,26 +1568,28 @@ class TelegramDownloaderGUI:
         self.is_downloading = not self.is_downloading
         if self.is_downloading:
             self.pause_btn.configure(text="Pause", fg_color=self.colors['warning'], hover_color="#e69500")
-            self._append_log("Download resumed.")
+            self.gui_log_output("Download resumed.")
         else:
-            self.pause_btn.configure(text="Resume", fg_color=self.colors['accent'], hover_color=self.colors['accent_hover'])
-            self._append_log("Download paused.")
-        # Ensure status label reflects the new state immediately
-        self._update_download_progress(self.progress_bar.get(), int(self.progress_label.cget("text").split('/')[0]),
-                                       int(self.progress_label.cget("text").split('/')[1]))
+            self.pause_btn.configure(text="Resume", fg_color=self.colors['accent'],
+                                     hover_color=self.colors['accent_hover'])
+            self.gui_log_output("Download paused.", "yellow")
+        # Use a dummy update to refresh status text
+        current = int(self.progress_label.cget("text").split('/')[0]) if '/' in self.progress_label.cget("text") else 0
+        total = int(self.progress_label.cget("text").split('/')[1]) if '/' in self.progress_label.cget("text") else 0
+        progress = self.progress_bar.get()
+        self._update_download_progress(progress, current, total, self.downloader.stats.copy())
 
     def stop_download(self):
         """Stop download"""
         if messagebox.askyesno("Confirm", "Stop download and return?"):
             self.stop_flag = True
             self.is_downloading = False
-            self.pause_btn.configure(text="Pause", fg_color=self.colors['warning'], hover_color="#e69500") # Reset button state
-            self._append_log("Stopping download...", "red")
+            self.pause_btn.configure(text="Pause", fg_color=self.colors['warning'],
+                                     hover_color="#e69500")  # Reset button state
+            self.gui_log_output("Stopping download...", "red")
 
-
-            # Chờ thread kết thúc
-            if self.download_thread and self.download_thread.is_alive():
-                self.download_thread.join(timeout=2)
+            # Let daemon thread terminate on its own or when app closes
+            # Do NOT block the GUI mainloop with .join() here.
 
             self.root.after(0, self.show_source_screen)
 
@@ -1722,9 +1598,6 @@ class TelegramDownloaderGUI:
         if self.is_downloading:
             if messagebox.askyesno("Confirm Exit", "Download in progress. Exit anyway?"):
                 self.stop_flag = True
-                # Give a moment for the thread to recognize stop_flag
-                if self.download_thread and self.download_thread.is_alive():
-                    self.download_thread.join(timeout=1)
                 self._disconnect_and_close_loop()
                 self.root.destroy()
         else:
@@ -1735,29 +1608,17 @@ class TelegramDownloaderGUI:
         """Disconnect Telegram client and close the active event loop."""
         if self.downloader and self.downloader.client and self.downloader.client.is_connected():
             try:
-                # To disconnect safely, we need to run it within the active event loop.
-                # Since the loop might not be continuously running, we execute this in a temporary context.
-                if self.active_loop and not self.active_loop.is_closed():
-                    # Attempt to run disconnect within the active loop if it's not already closed.
-                    # We might need to briefly set the loop for the current thread.
-                    current_thread_loop = None
-                    try:
-                        current_thread_loop = asyncio.get_event_loop()
-                    except RuntimeError:  # No current event loop in this thread
-                        pass
+                def disconnect_sync():
+                    if self.active_loop and not self.active_loop.is_closed():
+                        try:
+                            asyncio.set_event_loop(self.active_loop)
+                            self.active_loop.run_until_complete(self.downloader.client.disconnect())
+                        except Exception as e:
+                            print(f"Error during Telethon client disconnect in thread: {e}")
 
-                    if current_thread_loop is not self.active_loop:
-                        asyncio.set_event_loop(self.active_loop)
-
-                    try:
-                        self.active_loop.run_until_complete(self.downloader.client.disconnect())
-                    except Exception as e:
-                        print(f"Error during Telethon client disconnect: {e}")
-                    finally:
-                        if current_thread_loop:  # Restore original loop if it existed
-                            asyncio.set_event_loop(current_thread_loop)
-                else:
-                    print("Active loop not available or closed for graceful disconnect. Client might remain connected.")
+                disconnect_thread = threading.Thread(target=disconnect_sync, daemon=True)
+                disconnect_thread.start()
+                disconnect_thread.join(timeout=2)  # Give it a little time to try disconnecting
             except Exception as e:
                 print(f"Error attempting client disconnect: {e}")
 
@@ -1766,6 +1627,21 @@ class TelegramDownloaderGUI:
             self.active_loop.close()
         self.active_loop = None  # Reset the loop
         self.downloader = None  # Reset downloader instance
+
+    # _gui_confirm_callback is needed for hash mismatch check
+    def _gui_confirm_callback(self, title: str, message: str) -> bool:
+        """Helper to show a confirmation dialog and block the calling thread."""
+        self._gui_input_result = None
+        self._gui_event.clear()
+
+        def show_confirm_dialog():
+            result = messagebox.askyesno(title, message)
+            self._gui_input_result = result
+            self._gui_event.set()
+
+        self.root.after(0, show_confirm_dialog)
+        self._gui_event.wait()  # Blocks the background thread
+        return self._gui_input_result
 
     def run(self):
         """Chạy GUI"""
@@ -1781,6 +1657,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Fatal error: {e}")
         sys.exit(1)
-
-
-
