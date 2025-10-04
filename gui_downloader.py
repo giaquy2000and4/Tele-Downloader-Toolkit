@@ -1,4 +1,4 @@
-# !/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Telegram Media Downloader - CustomTkinter GUI
 Theme: Black-Cyan Dark Mode
@@ -105,6 +105,7 @@ class TelegramDownloaderGUI:
         self.selected_dialogs = []
         self.all_dialogs_info: List[Dict[str, Any]] = []  # To store all fetched dialogs for search/filter
         self.continue_selected_btn: Optional[ctk.CTkButton] = None  # Khai báo nút continue ở header
+        self.start_download_btn: Optional[ctk.CTkButton] = None # Nút bắt đầu tải ở màn hình lọc
 
         # Configure root
         self.root.configure(fg_color=self.colors['bg'])
@@ -123,8 +124,9 @@ class TelegramDownloaderGUI:
         """Xóa tất cả widgets trong main container"""
         for widget in self.main_container.winfo_children():
             widget.destroy()
-        # Reset reference to continue_selected_btn when screen is cleared
+        # Reset reference to continue_selected_btn and start_download_btn when screen is cleared
         self.continue_selected_btn = None
+        self.start_download_btn = None
 
     def load_accounts_from_env(self) -> List[Dict]:
         """Load danh sách tài khoản từ .env"""
@@ -761,6 +763,10 @@ class TelegramDownloaderGUI:
         self.clear_screen()
         self.current_screen = "filter"
 
+        # Ensure self.stats is up-to-date with downloader's stats before displaying
+        if self.downloader:
+            self.stats = self.downloader.stats.copy()
+
         # Header
         header_frame = ctk.CTkFrame(self.main_container, fg_color=self.colors['bg'])
         header_frame.pack(fill="x", pady=(0, 20))
@@ -782,62 +788,103 @@ class TelegramDownloaderGUI:
             command=self.show_source_screen  # Go back to the split source screen
         ).pack(side="right")
 
-        # Đảm bảo nút "Continue with Selected" ở header bị ẩn khi chuyển sang màn hình filter
+        # Ensure continue_selected_btn is hidden/disabled
         if self.continue_selected_btn:
             self.continue_selected_btn.pack_forget()
             self.continue_selected_btn.configure(state="disabled")
 
-        # Stats card
-        stats_card = self._create_card(self.main_container, "Current Statistics")
-        stats_grid = ctk.CTkFrame(stats_card, fg_color="transparent")
+        # Main content frame for two panels
+        content_frame = ctk.CTkFrame(self.main_container, fg_color=self.colors['bg'])
+        content_frame.pack(fill="both", expand=True)
+        content_frame.grid_columnconfigure(0, weight=1)  # Left panel
+        content_frame.grid_columnconfigure(1, weight=3)  # Right panel
+        content_frame.grid_rowconfigure(0, weight=1)
+
+        # Left Panel - Filter Selection Buttons
+        self.filter_left_panel = ctk.CTkFrame(content_frame, fg_color=self.colors['card'], corner_radius=10)
+        self.filter_left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10), pady=0)
+        self.filter_left_panel.grid_rowconfigure(3, weight=1) # Keeps buttons at top if panel expands
+
+        ctk.CTkLabel(self.filter_left_panel, text="FILTERS", font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=self.colors['text']).pack(pady=(15, 10))
+
+        self.filter_buttons = {}
+        filter_defs = [
+            ("Photos Only", "1", self.colors['accent']),
+            ("Videos Only", "2", "#9b59b6"),
+            ("Both Photos & Videos", "3", "#2ecc71")
+        ]
+        for text, filter_choice, color in filter_defs:
+            btn = ctk.CTkButton(
+                self.filter_left_panel,
+                text=text,
+                fg_color="transparent",
+                hover_color=color,
+                border_width=2,
+                border_color=color,
+                command=lambda f=filter_choice: self._select_filter_in_panel(f)
+            )
+            btn.pack(fill="x", padx=15, pady=5)
+            self.filter_buttons[filter_choice] = btn
+
+        # Right Panel - Scan Statistics and Start Download Button
+        self.filter_right_panel = ctk.CTkFrame(content_frame, fg_color=self.colors['card'], corner_radius=10)
+        self.filter_right_panel.grid(row=0, column=1, sticky="nsew", padx=(10, 0), pady=0)
+        self.filter_right_panel.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(self.filter_right_panel, text="SCAN RESULTS", font=ctk.CTkFont(size=18, weight="bold"),
+                     text_color=self.colors['text']).pack(pady=(20, 10))
+
+        # Stats grid
+        stats_grid = ctk.CTkFrame(self.filter_right_panel, fg_color="transparent")
         stats_grid.pack(fill="x", pady=10, padx=15)
 
         for i in range(4):
             stats_grid.grid_columnconfigure(i, weight=1)
 
-        self._create_stat_box(stats_grid, 0, str(self.stats['images_found']), "Photos", self.colors['accent'])
-        self._create_stat_box(stats_grid, 1, str(self.stats['videos_found']), "Videos", "#9b59b6")
-        self._create_stat_box(stats_grid, 2, str(self.stats['total_found']), "Total", "#2ecc71")
+        self._create_stat_box(stats_grid, 0, str(self.stats['images_found']), "Photos Found", self.colors['accent'])
+        self._create_stat_box(stats_grid, 1, str(self.stats['videos_found']), "Videos Found", "#9b59b6")
+        self._create_stat_box(stats_grid, 2, str(self.stats['total_found']), "Total Media", "#2ecc71")
+        size_str = humanize.naturalsize(self.stats['total_size'])
+        self._create_stat_box(stats_grid, 3, size_str, "Estimated Size", "#e67e22")
 
-        # Size calculation
-        size_str = humanize.naturalsize(self.stats['total_size'])  # Use humanize
-        self._create_stat_box(stats_grid, 3, size_str, "Size", "#e67e22")
+        # Spacer for layout
+        ctk.CTkFrame(self.filter_right_panel, fg_color="transparent", height=20).pack(fill="x", pady=10)
 
-        # Spacer
-        ctk.CTkLabel(self.main_container, text="", fg_color=self.colors['bg']).pack(pady=10)
-
-        # Filter options
-        options_frame = ctk.CTkFrame(self.main_container, fg_color=self.colors['bg'])
-        options_frame.pack(fill="both", expand=True)
-
-        for i in range(3):
-            options_frame.grid_columnconfigure(i, weight=1)
-        options_frame.grid_rowconfigure(0, weight=1)
-
-        # Re-using _create_source_card but for action buttons
-        self._create_source_card_as_button(
-            options_frame, 0, 0,
-            "Photos Only",
-            f"Download {self.stats['images_found']} photos",
-            self.colors['accent'],
-            lambda: self.start_download("1")
+        # Start Download Button (initially disabled)
+        self.start_download_btn = ctk.CTkButton(
+            self.filter_right_panel,
+            text="Start Download",
+            height=50,
+            font=ctk.CTkFont(size=18, weight="bold"),
+            fg_color=self.colors['accent'],
+            hover_color=self.colors['accent_hover'],
+            command=lambda: self.start_download(self.current_filter),
+            state="disabled" # Initially disabled until a filter is selected
         )
+        self.start_download_btn.pack(fill="x", padx=30, pady=(20, 30))
 
-        self._create_source_card_as_button(
-            options_frame, 0, 1,
-            "Videos Only",
-            f"Download {self.stats['videos_found']} videos",
-            "#9b59b6",
-            lambda: self.start_download("2")
-        )
+        # Automatically select the last filter if available and highlight it
+        if self.downloader and self.downloader.state.get_last_filter() in self.filter_buttons:
+            self._select_filter_in_panel(self.downloader.state.get_last_filter())
+        else:
+            # Default to "Both" if no last filter or invalid one, and highlight it
+            self._select_filter_in_panel("3")
 
-        self._create_source_card_as_button(
-            options_frame, 0, 2,
-            "Both",
-            f"Download all {self.stats['total_found']} files",
-            "#2ecc71",
-            lambda: self.start_download("3")
-        )
+    def _select_filter_in_panel(self, filter_choice: str):
+        """Handles selecting a filter type from the left panel, updates button appearance."""
+        self.current_filter = filter_choice
+
+        # Reset button colors and highlight the selected one
+        for btn_choice, btn_widget in self.filter_buttons.items():
+            if btn_choice == filter_choice:
+                btn_widget.configure(fg_color=btn_widget.cget("border_color"), text_color=self.colors['bg'])
+            else:
+                btn_widget.configure(fg_color="transparent", text_color=btn_widget.cget("border_color"))
+
+        # Enable the start download button
+        self.start_download_btn.configure(state="normal")
+
 
     # ==================== DOWNLOAD SCREEN ====================
     def show_download_screen(self):
@@ -879,6 +926,10 @@ class TelegramDownloaderGUI:
         if self.continue_selected_btn:
             self.continue_selected_btn.pack_forget()
             self.continue_selected_btn.configure(state="disabled")
+        # Đảm bảo nút "Start Download" ở màn hình filter bị ẩn
+        if self.start_download_btn:
+            self.start_download_btn.pack_forget()
+            self.start_download_btn.configure(state="disabled")
 
         # Progress card
         progress_card = ctk.CTkFrame(self.main_container, fg_color=self.colors['card'], corner_radius=10)
@@ -1008,6 +1059,7 @@ class TelegramDownloaderGUI:
 
         return card
 
+    # _create_source_card_as_button is no longer used by show_filter_screen, so it remains as is
     def _create_source_card_as_button(self, parent, row, col, title, subtitle, color, command):  # Renamed
         """Tạo card cho source selection (đã chuyển thành nút hành động)"""
         card = ctk.CTkFrame(
@@ -1258,18 +1310,13 @@ class TelegramDownloaderGUI:
 
     def _update_scan_progress_callback(self, current: int, total: Optional[int]):
         """Callback for scan progress updates."""
-        if self.current_screen == "source" and hasattr(self, 'right_panel'):
+        if self.current_screen == "source" and hasattr(self, '_scan_progress_label'):
             scan_progress_label = getattr(self, '_scan_progress_label', None)
-            if not scan_progress_label:
-                # This state shouldn't happen often if _initiate_scan sets it up
-                # But as a fallback, ensure the label exists or create it.
-                self.root.after(0, lambda: self.gui_log_output(f"Scan progress: {current} messages processed.", "blue"))
-                return
-
-            # Update label text directly from the main thread via after()
-            self.root.after(0, lambda: scan_progress_label.configure(
-                text=f"Scanning... {current} messages processed." if total is None else f"Scanning complete. Found {self.downloader.stats['total_found']} media in {current} messages."
-            ))
+            if scan_progress_label:
+                # Update label text directly from the main thread via after()
+                self.root.after(0, lambda: scan_progress_label.configure(
+                    text=f"Scanning... {current} messages processed." if total is None else f"Scanning complete. Found {self.downloader.stats['total_found']} media in {current} messages."
+                ))
         self.root.update_idletasks()  # Ensure UI updates immediately
 
     def _initiate_scan(self, source_type: str):
@@ -1480,7 +1527,7 @@ class TelegramDownloaderGUI:
 
         # Update status
         source_label = "Saved Messages" if self.selected_dialogs == ['me'] else f"{len(self.selected_dialogs)} dialogs"
-        filter_label = {"1": "Photos only", "2": "Videos only", "3": "Both"}[filter_choice]
+        filter_label = {"1": "Photos only", "2": "Videos only", "3": "Both Photos & Videos"}[filter_choice]
 
         status_text = f"• Source: {source_label}\n"
         status_text += f"• Directory: {self.downloader.download_dir}\n"
@@ -1540,7 +1587,7 @@ class TelegramDownloaderGUI:
 
         # Update status
         source_label = "Saved Messages" if self.selected_dialogs == ['me'] else f"{len(self.selected_dialogs)} dialogs"
-        filter_label = {"1": "Photos only", "2": "Videos only", "3": "Both"}[self.current_filter]
+        filter_label = {"1": "Photos only", "2": "Videos only", "3": "Both Photos & Videos"}[self.current_filter]
 
         status_text = f"• Source: {source_label}\n"
         status_text += f"• Directory: {self.downloader.download_dir}\n"
