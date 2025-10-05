@@ -1291,9 +1291,11 @@ class TelegramDownloaderGUI:
         """Reset .env file"""
         if messagebox.askyesno("Confirm Reset",
                                "Reset all config? This will delete all account info and saved sessions!"):
-            # Use do_reset_flow from downloader.py
-            self.envd = do_reset_flow(self.gui_get_input, self.gui_log_output)
+            # Directly reset the environment data, avoiding the call to do_reset_flow
+            # as its interactive input function causes a deadlock in the GUI thread.
+            self.envd = {"CURRENT_ACCOUNT": "0"}  # Reset envd to initial state
             save_env(self.env_path, self.envd)
+
             # Purge all session files
             try:
                 session_dir = Path("sessions")
