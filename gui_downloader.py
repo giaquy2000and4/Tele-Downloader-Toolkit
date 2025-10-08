@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Telegram Media Downloader - CustomTkinter GUI
-Theme: Black-Cyan Dark Mode
-Tích hợp hoàn toàn với downloader.py gốc
-"""
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
@@ -15,7 +10,7 @@ import sys
 import os
 import humanize
 
-# Import từ file downloader.py gốc
+
 from downloader import (
     TelegramDownloader,
     StateManager,
@@ -27,13 +22,13 @@ from downloader import (
     set_current_account_index,
     purge_session_files_for,
     ENV_TEMPLATE,
-    input_nonempty,  # Import this for cleaner login flow logic
-    do_login_flow,  # Import to reuse account management logic
-    do_reset_flow,  # Import to reuse reset logic
-    do_logout_flow  # Import to reuse logout logic
+    input_nonempty,
+    do_login_flow,
+    do_reset_flow,
+    do_logout_flow
 )
 
-# Thêm các lỗi Telethon cần thiết
+
 from telethon.errors import (
     SessionPasswordNeededError,
     PhoneCodeInvalidError,
@@ -55,7 +50,7 @@ class TelegramDownloaderGUI:
         self.root.geometry("950x750")
         self.root.minsize(850, 650)
 
-        # Custom colors (Black-Cyan theme)
+
         self.colors = {
             'bg': '#0a0e14',
             'card': '#151b24',
@@ -68,7 +63,7 @@ class TelegramDownloaderGUI:
             'error': '#ff4757',
         }
 
-        # Đường dẫn .env
+
         self.env_path = Path(".env")
         ensure_env_exists(self.env_path)
 
@@ -82,7 +77,7 @@ class TelegramDownloaderGUI:
         self.stop_flag = False
         self.active_loop: Optional[asyncio.AbstractEventLoop] = None  # Lưu event loop đang hoạt động
 
-        # For blocking/unblocking threads for user input via GUI dialogs
+
         self._gui_event = threading.Event()
         self._gui_input_result: Any = None
 
@@ -97,15 +92,15 @@ class TelegramDownloaderGUI:
             'total_size': 0,
         }
 
-        # Media list và source info
+
         self.media_list = []
-        self.filtered_media_list = []  # Filtered list for actual download
+        self.filtered_media_list = []
         self.current_source_type = None
-        self.current_filter = "3"  # 1=photos, 2=videos, 3=both
+        self.current_filter = "3"
         self.selected_dialogs = []
-        self.all_dialogs_info: List[Dict[str, Any]] = []  # To store all fetched dialogs for search/filter
-        self.continue_selected_btn: Optional[ctk.CTkButton] = None  # Khai báo nút continue ở header
-        self.start_download_btn: Optional[ctk.CTkButton] = None # Nút bắt đầu tải ở màn hình lọc
+        self.all_dialogs_info: List[Dict[str, Any]] = []
+        self.continue_selected_btn: Optional[ctk.CTkButton] = None
+        self.start_download_btn: Optional[ctk.CTkButton] = None
 
         # Configure root
         self.root.configure(fg_color=self.colors['bg'])
@@ -392,7 +387,7 @@ class TelegramDownloaderGUI:
         btn_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
         btn_frame.pack(side="right")
 
-        # Nút Logout (đặt nó trước và pack side="right" để nó ở ngoài cùng bên phải)
+
         ctk.CTkButton(
             btn_frame,
             text="Logout",
@@ -402,7 +397,7 @@ class TelegramDownloaderGUI:
             command=self.handle_logout_and_return
         ).pack(side="right", padx=(5, 0))  # Thêm padx để có khoảng trống với cạnh phải của header
 
-        # Nút "Continue with Selected" (pack sau với side="right", nó sẽ nằm bên trái của Logout)
+        
         self.continue_selected_btn = ctk.CTkButton(
             btn_frame,
             text="Continue with Selected",
