@@ -1,22 +1,5 @@
 #!/usr/bin/env python3
-"""
-Telegram Saved Messages Media Downloader
 
-- Flexible UI: Can be used with console (default) or integrated with GUI.
-- Self-checks/creates .env if configuration is missing.
-- Supports multiple accounts via .env (ACCOUNT_n_*), account selection on login.
-- LOGOUT: Logs out current Telethon session + deletes login marker.
-- RESET: Clears .env contents and reverts to initial state (can be recreated on LOGIN).
-- Allows users to CHOOSE folder name and LOCATION -> saves to account's DOWNLOAD_DIR.
-
-.env structure (multi-account):
-CURRENT_ACCOUNT=0
-# Example:
-# ACCOUNT_1_PHONE=+84123456789
-# ACCOUNT_1_API_ID=123456
-# ACCOUNT_1_API_HASH=xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-# ACCOUNT_1_DOWNLOAD_DIR=/absolute/path/to/downloads
-"""
 
 import asyncio
 import os
@@ -45,13 +28,11 @@ except ImportError as e:
     print("Install: pip install telethon")
     sys.exit(1)
 
-# Only import colorama and tqdm if we are potentially running in a console
-# This is handled by the `if __name__ == "__main__":` block for console-specific UI.
+
 try:
     from colorama import Fore, Style
     import colorama
 except ImportError:
-    # Fallback for no colorama (e.g., in GUI context where it's not needed)
     class NoColor:
         def __getattr__(self, name):
             return ''
@@ -64,8 +45,7 @@ except ImportError:
 try:
     from tqdm import tqdm
 except ImportError:
-    # Fallback for no tqdm
-    tqdm = lambda x, **kwargs: x  # No-op tqdm
+        tqdm = lambda x, **kwargs: x
 
 try:
     import humanize
@@ -171,7 +151,7 @@ def save_env(env_path: Path, data: Dict[str, str]) -> None:
 
 def pick_account_index(data: Dict[str, str], input_func: Callable[[str, Optional[str]], str],
                        log_func: Callable[[str], None]) -> int:
-    # tìm tất cả ACCOUNT_n_PHONE để liệt kê
+
     idxs = sorted({int(k.split("_")[1]) for k in data.keys() if
                    k.startswith("ACCOUNT_") and k.endswith("_PHONE") and k.split("_")[1].isdigit()})
     if not idxs:
@@ -210,7 +190,7 @@ def set_current_account_index(data: Dict[str, str], idx: int) -> Dict[str, str]:
 
 
 def input_nonempty(prompt: str, input_func: Callable[[str, Optional[str]], str], default: Optional[str] = None) -> str:
-    p = prompt  # + (f" [{default}]" if default else "") # GUI input handles default differently
+    p = prompt
     while True:
         val = input_func(p, default).strip()
         if not val and default is not None:
@@ -222,10 +202,8 @@ def input_nonempty(prompt: str, input_func: Callable[[str, Optional[str]], str],
 
 def do_login_flow(envd: Dict[str, str], input_func: Callable[[str, Optional[str]], str],
                   log_func: Callable[[str], None]) -> Dict[str, str]:
-    # thêm / sửa 1 account
     idx = pick_account_index(envd, input_func, log_func)
     if idx == 0:
-        # tạo mới index
         existing_idxs = [int(k.split("_")[1]) for k in envd.keys() if
                          k.startswith("ACCOUNT_") and k.endswith("_PHONE") and k.split("_")[1].isdigit()]
         idx = 1 if not existing_idxs else max(existing_idxs) + 1
@@ -278,10 +256,6 @@ async def do_logout_flow(envd: Dict[str, str], log_func: Callable[[str], None]) 
 # ============================ STATE (RESUME) =============================
 
 class StateManager:
-    """
-    Lưu/truy hồi trạng thái tải cho từng tài khoản (per-account)
-    Lưu tại: <DOWNLOAD_DIR>/.resume.json
-    """
 
     def __init__(self, download_dir: Path, account_index: int):
         self.download_dir = Path(download_dir)
@@ -457,16 +431,16 @@ class TelegramDownloader:
                 except SessionPasswordNeededError:
                     await self.client.sign_in(password=self._password_callback())  # Pass blocking input function
                 except PhoneCodeInvalidError:
-                    self._log_output(c(pad("❌ Mã OTP không đúng. Vui lòng thử lại.", WIDTH, "left"), Fore.RED))
+                    self._log_output(c(pad(" Wrong OTP, please try again", WIDTH, "left"), Fore.RED))
                     return False
                 except PhoneCodeExpiredError:
-                    self._log_output(c(pad("⏰ Mã OTP đã hết hạn. Vui lòng gửi lại mã.", WIDTH, "left"), Fore.YELLOW))
+                    self._log_output(c(pad(" The OTP code has expired. Please resend the code", WIDTH, "left"), Fore.YELLOW))
                     return False
                 except PasswordHashInvalidError:
-                    self._log_output(c(pad("❌ Sai mật khẩu 2FA. Vui lòng thử lại.", WIDTH, "left"), Fore.RED))
+                    self._log_output(c(pad(" Incorrect 2FA password. Please try again.", WIDTH, "left"), Fore.RED))
                     return False
                 except Exception as e:
-                    self._log_output(c(pad(f"Lỗi đăng nhập: {e}", WIDTH, "left"), Fore.RED))
+                    self._log_output(c(pad(f"Login error: {e}", WIDTH, "left"), Fore.RED))
                     return False
 
             me = await self.client.get_me()
@@ -502,7 +476,7 @@ class TelegramDownloader:
                 "username": uname,
                 "etype": etype,
             })
-        lines = [pad("DANH SÁCH DIALOGS", WIDTH - 2), pad("", WIDTH - 2)]
+        lines = [pad("LIST OF DIALOGS", WIDTH - 2), pad("", WIDTH - 2)]
         for r in rows:
             label = f"[{r['index']:>3}] {r['title']} {r['username']}  ({r['etype']})"
             lines.append(pad(label, WIDTH - 2))
