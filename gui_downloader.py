@@ -10,7 +10,6 @@ import sys
 import os
 import humanize
 
-
 from downloader import (
     TelegramDownloader,
     StateManager,
@@ -27,7 +26,6 @@ from downloader import (
     do_reset_flow,
     do_logout_flow
 )
-
 
 from telethon.errors import (
     SessionPasswordNeededError,
@@ -50,7 +48,6 @@ class TelegramDownloaderGUI:
         self.root.geometry("950x750")
         self.root.minsize(850, 650)
 
-
         self.colors = {
             'bg': '#0a0e14',
             'card': '#151b24',
@@ -62,7 +59,6 @@ class TelegramDownloaderGUI:
             'warning': '#ffa500',
             'error': '#ff4757',
         }
-
 
         self.env_path = Path(".env")
         ensure_env_exists(self.env_path)
@@ -77,7 +73,6 @@ class TelegramDownloaderGUI:
         self.stop_flag = False
         self.active_loop: Optional[asyncio.AbstractEventLoop] = None  # Lưu event loop đang hoạt động
 
-
         self._gui_event = threading.Event()
         self._gui_input_result: Any = None
 
@@ -91,7 +86,6 @@ class TelegramDownloaderGUI:
             'errors': 0,
             'total_size': 0,
         }
-
 
         self.media_list = []
         self.filtered_media_list = []
@@ -221,18 +215,26 @@ class TelegramDownloaderGUI:
         )
         subtitle.pack()
 
-        # Scrollable frame
-        scroll_frame = ctk.CTkScrollableFrame(
-            self.main_container,
+        # New content frame for the two-column layout
+        content_grid_frame = ctk.CTkFrame(self.main_container, fg_color=self.colors['bg'])
+        content_grid_frame.pack(fill="both", expand=True, padx=0, pady=0)
+
+        content_grid_frame.grid_columnconfigure(0, weight=1)  # Left column for existing accounts
+        content_grid_frame.grid_columnconfigure(1, weight=1)  # Right column for adding new account
+        content_grid_frame.grid_rowconfigure(0, weight=1)
+
+        # --- Left Column: Existing Accounts (with scroll) ---
+        accounts_scroll_frame = ctk.CTkScrollableFrame(
+            content_grid_frame,
             fg_color=self.colors['bg']
         )
-        scroll_frame.pack(fill="both", expand=True)
+        accounts_scroll_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10), pady=0)
 
-        # Existing accounts
+        accounts_card = self._create_card(accounts_scroll_frame, "Existing Accounts")
+        accounts_card.pack(fill="x", pady=10, padx=0)  # Pack accounts_card into accounts_scroll_frame
+
         accounts = self.load_accounts_from_env()
         if accounts:
-            accounts_card = self._create_card(scroll_frame, "Existing Accounts")
-
             for acc in accounts:
                 acc_frame = ctk.CTkFrame(accounts_card, fg_color=self.colors['card'])
                 acc_frame.pack(fill="x", pady=5, padx=15)
@@ -273,9 +275,12 @@ class TelegramDownloaderGUI:
                     hover_color=self.colors['accent_hover'],
                     command=lambda idx=acc['id']: self.select_account(idx)
                 ).pack(side="right", padx=10, pady=10)
+        else:
+            ctk.CTkLabel(accounts_card, text="No existing accounts.", text_color=self.colors['text_dim']).pack(pady=20)
 
-        # Add new account
-        add_card = self._create_card(scroll_frame, "Add New Account")
+        # --- Right Column: Add New Account ---
+        add_card = self._create_card(content_grid_frame, "Add New Account")
+        add_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0), pady=0)
 
         form_frame = ctk.CTkFrame(add_card, fg_color="transparent")
         form_frame.pack(fill="both", padx=15, pady=(0, 15))
@@ -348,7 +353,7 @@ class TelegramDownloaderGUI:
             command=self.handle_login
         ).pack(fill="x", pady=(10, 0))
 
-        # Bottom buttons (kept for now, could be moved to a "settings" screen in a larger refactor)
+        # Bottom buttons (kept at the bottom of main_container)
         btn_frame = ctk.CTkFrame(self.main_container, fg_color=self.colors['bg'])
         btn_frame.pack(fill="x", pady=(10, 0))
 
@@ -387,17 +392,6 @@ class TelegramDownloaderGUI:
         btn_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
         btn_frame.pack(side="right")
 
-
-        ctk.CTkButton(
-            btn_frame,
-            text="Logout",
-            fg_color=self.colors['card'],
-            border_width=1,
-            border_color=self.colors['accent'],
-            command=self.handle_logout_and_return
-        ).pack(side="right", padx=(5, 0))  # Thêm padx để có khoảng trống với cạnh phải của header
-
-        
         self.continue_selected_btn = ctk.CTkButton(
             btn_frame,
             text="Continue with Selected",
@@ -408,6 +402,15 @@ class TelegramDownloaderGUI:
         # Pack với side="right" và padx để tạo khoảng cách với nút Logout
         self.continue_selected_btn.pack(side="right", padx=(0, 10))  # padx=(0, 10) tạo 10px padding bên phải nút này
         self.continue_selected_btn.pack_forget()  # Vẫn ẩn nút theo mặc định
+
+        ctk.CTkButton(
+            btn_frame,
+            text="Logout",
+            fg_color=self.colors['card'],
+            border_width=1,
+            border_color=self.colors['accent'],
+            command=self.handle_logout_and_return
+        ).pack(side="right", padx=(5, 0))  # Thêm padx để có khoảng trống với cạnh phải của header
 
         # Main content frame for two panels
         content_frame = ctk.CTkFrame(self.main_container, fg_color=self.colors['bg'])
@@ -798,7 +801,7 @@ class TelegramDownloaderGUI:
         # Left Panel - Filter Selection Buttons
         self.filter_left_panel = ctk.CTkFrame(content_frame, fg_color=self.colors['card'], corner_radius=10)
         self.filter_left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10), pady=0)
-        self.filter_left_panel.grid_rowconfigure(3, weight=1) # Keeps buttons at top if panel expands
+        self.filter_left_panel.grid_rowconfigure(3, weight=1)  # Keeps buttons at top if panel expands
 
         ctk.CTkLabel(self.filter_left_panel, text="FILTERS", font=ctk.CTkFont(size=16, weight="bold"),
                      text_color=self.colors['text']).pack(pady=(15, 10))
@@ -855,7 +858,7 @@ class TelegramDownloaderGUI:
             fg_color=self.colors['accent'],
             hover_color=self.colors['accent_hover'],
             command=lambda: self.start_download(self.current_filter),
-            state="disabled" # Initially disabled until a filter is selected
+            state="disabled"  # Initially disabled until a filter is selected
         )
         self.start_download_btn.pack(fill="x", padx=30, pady=(20, 30))
 
@@ -879,7 +882,6 @@ class TelegramDownloaderGUI:
 
         # Enable the start download button
         self.start_download_btn.configure(state="normal")
-
 
     # ==================== DOWNLOAD SCREEN ====================
     def show_download_screen(self):
@@ -1041,7 +1043,7 @@ class TelegramDownloaderGUI:
     def _create_card(self, parent, title):
         """Tạo card container"""
         card = ctk.CTkFrame(parent, fg_color=self.colors['card'], corner_radius=10)
-        card.pack(fill="x", pady=10)
+        # card.pack(fill="x", pady=10) # Dòng này đã được loại bỏ
 
         if title:
             title_label = ctk.CTkLabel(
