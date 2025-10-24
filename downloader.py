@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+
+
 import asyncio
 import os
 import sys
@@ -607,7 +610,7 @@ class TelegramDownloader:
 
     # ========== LIỆT KÊ & QUÉT ==========
 
-    async def list_dialogs(self) -> List[dict]:
+    async def list_dialogs(self, print_to_cli: bool = True) -> List[dict]:  # Added print_to_cli flag
         self._log_output(pad("Fetching dialogs (chats/channels)...", WIDTH, "left"))
         rows = []
         idx = 0
@@ -625,9 +628,10 @@ class TelegramDownloader:
                 "title": title,
                 "username": uname,
                 "etype": etype,
+                "id": getattr(entity, 'id', None)  # Explicitly add entity's ID for safer access
             })
-        # CLI print only - GUI will render its own
-        if self._log_output == console_log_func:  # Only print box for CLI
+        # Only print box for CLI if print_to_cli is True
+        if print_to_cli and self._log_output == console_log_func:
             lines = [pad("LIST OF DIALOGS", WIDTH - 2), pad("", WIDTH - 2)]
             for r in rows:
                 label = f"[{r['index']:>3}] {r['title']} {r['username']}  ({r['etype']})"
@@ -733,6 +737,9 @@ class TelegramDownloader:
         if mime.startswith("video/"):
             return ".mp4"
         if mime.startswith("image/"):
+            # Common image formats. telethon downloads photos as .jpg by default.
+            if 'png' in mime: return '.png'
+            if 'gif' in mime: return '.gif'
             return ".jpg"
         return ""
 
@@ -798,7 +805,7 @@ class TelegramDownloader:
         """
         Downloads media files from the given list.
         stop_flag: a callable that returns True if the download should stop.
-        progress_callback: a callable (progress, current, total, stats) for UI updates.
+        progress_callback: a callable (progress, current_processed, total_items, stats) for UI updates.
         """
         total_items = len(media_list)
         current_processed = 0
@@ -873,16 +880,18 @@ class TelegramDownloader:
 
         self._log_output(pad("All media download attempts processed.", WIDTH, "left"), "blue")
 
-    # ===================== NEW UPLOAD METHOD =====================
+    # ===================== NEW UPLOAD METHODS =====================
+
     async def upload_media(
             self,
             peer: Union[User, Chat, Channel, int, str],
             file_path: Path,
             caption: Optional[str] = None,
             progress_callback: Optional[Callable[[float, int, int], None]] = None
+            # (progress_percentage, current_bytes, total_bytes)
     ):
         """
-        Uploads a media file to a specified peer (user/chat/channel).
+        Uploads a single media file to a specified peer (user/chat/channel).
         """
         if not self.client.is_connected():
             raise ConnectionError("Telegram client is not connected. Please ensure you are logged in.")
@@ -931,6 +940,99 @@ class TelegramDownloader:
             self._log_output(pad(f"Error uploading '{file_path.name}' to '{peer_name}': {e}", WIDTH, "left"), "red")
             raise  # Re-raise for GUI/CLI to catch and display
 
+    def is_media_file(self, file_path: Path) -> bool:
+        """Checks if a file has a common media extension."""
+        if not file_path.is_file():
+            return False
+
+        # Common image and video extensions
+        media_extensions = {
+            '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp',  # Images
+            '.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv', '.gifv'  # Videos
+        }
+        return file_path.suffix.lower() in media_extensions
+
+    async def upload_folder_media(
+            self,
+            peer: Union[User, Chat, Channel, int, str],
+            folder_path: Path,
+            caption: Optional[str] = None,
+            progress_callback: Optional[Callable[[float, int, int, int, int], None]] = None,
+            # (overall_progress, current_file_index, total_files, current_file_bytes, total_file_bytes)
+            stop_flag: Optional[Callable[[], bool]] = None
+    ):
+        """
+        Uploads all media files from a specified folder to a peer.
+        """
+        if not self.client.is_connected():
+            raise ConnectionError("Telegram client is not connected. Please ensure you are logged in.")
+        if not folder_path.is_dir():
+            self._log_output(pad(f"Folder not found at '{folder_path}'.", WIDTH, "left"), "red")
+            raise FileNotFoundError(f"Folder not found: {folder_path}")
+
+        media_files = [f for f in folder_path.iterdir() if self.is_media_file(f)]
+        if not media_files:
+            self._log_output(pad(f"No media files found in '{folder_path}'.", WIDTH, "left"), "yellow")
+            return
+
+        total_files = len(media_files)
+        uploaded_count = 0
+        failed_count = 0
+
+        self._log_output(
+            pad(f"Starting batch upload of {total_files} media files from '{folder_path.name}'...", WIDTH, "left"),
+            "blue")
+
+        # Resolve peer entity once
+        peer_entity = None
+        try:
+            if isinstance(peer, (int, str)):
+                peer_entity = await self.client.get_entity(peer)
+            else:
+                peer_entity = peer
+            peer_name = peer_entity.title if hasattr(peer_entity, 'title') else peer_entity.first_name if hasattr(
+                peer_entity, 'first_name') else str(peer)
+            self._log_output(pad(f"Resolved destination: '{peer_name}'", WIDTH, "left"), "blue")
+        except Exception as e:
+            self._log_output(pad(f"Error resolving destination '{peer}': {e}", WIDTH, "left"), "red")
+            raise ValueError(f"Invalid destination '{peer}'. Please check the ID or username.") from e
+
+        for i, file_path in enumerate(media_files):
+            if stop_flag and stop_flag():
+                self._log_output(pad("Upload stopped by user.", WIDTH, "left"), "red")
+                break
+
+            self._log_output(pad(f"[{i + 1}/{total_files}] Uploading '{file_path.name}'...", WIDTH, "left"), "blue")
+
+            # Inner progress callback for the single file being uploaded
+            def file_progress_adapter(progress_percentage, current_bytes, total_bytes):
+                if progress_callback:
+                    overall_progress = (uploaded_count + progress_percentage) / total_files
+                    progress_callback(overall_progress, i + 1, total_files, current_bytes, total_bytes)
+
+            try:
+                await self.upload_media(
+                    peer_entity,  # Use the already resolved entity
+                    file_path,
+                    caption,
+                    progress_callback=file_progress_adapter
+                )
+                uploaded_count += 1
+            except Exception as e:
+                failed_count += 1
+                self._log_output(pad(f"Failed to upload '{file_path.name}': {e}", WIDTH, "left"), "red")
+
+            # Ensure overall progress is updated even if a file fails or finishes without final callback from Telethon
+            if progress_callback:
+                overall_progress = (
+                                               uploaded_count + failed_count) / total_files  # This assumes 1.0 for each completed file
+                progress_callback(overall_progress, i + 1, total_files, 0,
+                                  0)  # Current file bytes/total file bytes not available here
+
+        self._log_output(
+            pad(f"Batch upload finished. Uploaded {uploaded_count}/{total_files} files. Failed: {failed_count}", WIDTH,
+                "left"), "green")
+
     # ===================== CHẠY THEO NGUỒN =======================
 
     async def _run_with_source(self, src_type: str, chosen_entities: Optional[List[Any]] = None,
@@ -939,8 +1041,9 @@ class TelegramDownloader:
                                progress_callback_scan: Optional[Callable[[int, Optional[int]], None]] = None,
                                # For GUI scan progress
                                progress_callback_download: Optional[
-                                   Callable[[float, int, int, Dict[str, Any]], None]] = None
+                                   Callable[[float, int, int, Dict[str, Any]], None]] = None,
                                # For GUI download progress
+                               stop_flag: Optional[Callable[[], bool]] = None  # For GUI to stop scan
                                ) -> bool:
         """
         Thực thi chu trình quét + tải theo nguồn đã biết.
@@ -949,7 +1052,11 @@ class TelegramDownloader:
         confirm_callback: a callable (title, message) for user confirmation (e.g., reset progress)
         progress_callback_scan: a callable (current_messages_scanned, total_messages_in_dialog) for scan updates.
         progress_callback_download: a callable (progress, current_items_processed, total_items_to_process, current_stats) for UI updates.
+        stop_flag: a callable that returns True if the scan/download should stop.
         """
+        if stop_flag is None:  # Default to always continue for CLI without external stop
+            stop_flag = lambda: False
+
         # 1) Scan theo nguồn
         if src_type == "saved":
             media_list = await self.scan_saved_messages(progress_callback_scan)
@@ -957,7 +1064,7 @@ class TelegramDownloader:
         else:
             if chosen_entities is None:
                 self._log_output(pad("Không có entities để quét.", WIDTH, "left"), "red")
-                return True
+                return False
             media_list = await self.scan_media_in_dialogs(chosen_entities, progress_callback_scan)
             # rút id entity (int)
             dialog_ids = []
@@ -969,7 +1076,7 @@ class TelegramDownloader:
 
         if not media_list:
             self._log_output(pad("No media found.", WIDTH, "left"), "yellow")
-            return True
+            return False
 
         # 2) Tính hash danh sách message ids
         current_ids = [int(m['message'].id) for m in media_list]
@@ -1019,12 +1126,13 @@ class TelegramDownloader:
         # 6) In stats + chọn filter (mặc định lấy last_filter)
         if self._log_output == console_log_func:  # Only print for CLI
             self.print_stats()
+            choice = self.prompt_download_choice(default=self.state.get_last_filter())
+        else:  # GUI will set filter directly, or use last filter
+            choice = self.state.get_last_filter()
 
-        choice = self.prompt_download_choice(
-            default=self.state.get_last_filter()) if self._log_output == console_log_func else self.state.get_last_filter()  # GUI will set filter directly
-        if choice not in {"1", "2", "3"}:
+        if choice not in {"1", "2", "3"}:  # This check is more relevant for CLI prompt. GUI should ensure valid choice.
             self._log_output(pad("Canceled by user choice.", WIDTH, "left"), "yellow")
-            return True
+            return False
         # lưu bộ lọc vào state
         self.state.set_source(src_type, dialog_ids, total_found=len(media_list), ids_hash=ids_hash, last_filter=choice)
 
@@ -1035,6 +1143,9 @@ class TelegramDownloader:
             filtered = [m for m in media_list if m['type'] == 'video']
         else:  # Both photos & videos or invalid filter (default to both)
             filtered = media_list
+
+        # Store filtered media list for GUI to use in download screen
+        self.media_list = filtered  # Added this line for GUI to access filtered list
 
         # 8) Áp dụng resume: bỏ completed + file tồn tại
         resumable = []
@@ -1053,136 +1164,54 @@ class TelegramDownloader:
             if self._log_output == console_log_func: self.print_stats()  # Only print for CLI
             return True
 
-        # 9) Tải
+        # If this is called from GUI scan, we don't start download yet.
+        # GUI will transition to filter screen, then start download.
+        if self._log_output != console_log_func:  # If not CLI, just return, GUI handles next step
+            return True
+
+        # 9) Tải (CLI only from here, GUI branches off)
         start_time = time.time()
         # Pass the stop_flag and progress_callback_download directly
-        await self.download_all_media(resumable, stop_flag=lambda: False,
+        await self.download_all_media(resumable, stop_flag=stop_flag,
                                       progress_callback=progress_callback_download)  # CLI does not typically have an external stop_flag or UI progress, unless passed.
         elapsed = time.time() - start_time
         self._log_output(pad("Download finished.", WIDTH, "left"), "blue")
         self._log_output(pad(f"Elapsed: {humanize.naturaldelta(elapsed)}", WIDTH, "left"), "blue")
-        if self._log_output == console_log_func: self.print_stats()
         if self.stats['downloaded'] > 0 and elapsed > 0:
             avg_speed = self.stats['total_size'] / elapsed
             self._log_output(pad(f"Average speed: {humanize.naturalsize(avg_speed)}/s", WIDTH, "left"), "blue")
         return True
 
-    # ===================== LUỒNG CHÍNH (CLI) =======================
-
-    async def run_cli_main_loop(self) -> bool:  # Renamed from run to avoid conflict and specify CLI context
-        self.print_banner()
-        if not await self.connect_client():
-            return False
-        try:
-            # NGUỒN QUÉT
-            lines = [
-                pad("Select SOURCE to scan media:", WIDTH - 2),
-                pad("1) Saved Messages (me)", WIDTH - 2),
-                pad("2) Select specific dialogs/channels", WIDTH - 2),
-                pad("3) All dialogs/channels", WIDTH - 2),
-                pad("4) Continue LAST SESSION", WIDTH - 2),
-            ]
-            self._log_output(c(box(lines), Fore.YELLOW))
-            src_choice = self._get_input("Your choice", hide_input=False).strip()
-            self._log_output(line("-"))
-
-            if src_choice == "4":
-                # Continue last session
-                prev = self.state.get_source()
-                if not prev or not prev.get("type"):
-                    self._log_output(pad("No previous session to continue.", WIDTH, "left"), "yellow")
-                    return True
-                typ = prev.get("type")
-                if typ == "saved":
-                    return await self._run_with_source("saved")
-                else:
-                    # dựng lại entities từ id
-                    want_ids = [int(x) for x in prev.get("dialog_ids", []) if str(x).isdigit() and int(x) != 0]
-                    rows = await self.list_dialogs()  # This prints dialogs to CLI
-                    ents = []
-                    for r in rows:
-                        try:
-                            if int(getattr(r["entity"], "id", 0)) in want_ids:
-                                ents.append(r["dialog"].entity)
-                        except Exception:
-                            pass
-                    if not ents:
-                        self._log_output(pad("Could not restore dialog list from previous session.", WIDTH, "left"),
-                                         "yellow")
-                        return True
-                    return await self._run_with_source(typ, ents)
-
-            if src_choice == "1":
-                return await self._run_with_source("saved")
-
-            elif src_choice == "2":
-                rows = await self.list_dialogs()  # This prints dialogs to CLI
-                if not rows:
-                    self._log_output(pad("No dialogs found.", WIDTH, "left"), "yellow")
-                    return True
-                self._log_output(
-                    pad("Enter indexes of dialogs to scan (e.g.: 1,3,5-7). Enter to cancel.", WIDTH, "left"))
-                pick = self._get_input("Pick", hide_input=False).strip()
-                self._log_output(line("-"))
-                if not pick:
-                    self._log_output(pad("Canceled by user.", WIDTH, "left"), "yellow")
-                    return True
-
-                selected = set()
-                for part in pick.split(","):
-                    part = part.strip()
-                    if "-" in part:
-                        a, b = part.split("-", 1)
-                        if a.isdigit() and b.isdigit():
-                            for k in range(int(a), int(b) + 1):
-                                selected.add(k)
-                    elif part.isdigit():
-                        selected.add(int(part))
-
-                chosen = [r["dialog"].entity for r in rows if r["index"] in selected]
-                if not chosen:
-                    self._log_output(pad("No valid selection.", WIDTH, "left"), "yellow")
-                    return True
-                return await self._run_with_source("dialogs", chosen)
-
-            elif src_choice == "3":
-                rows = await self.list_dialogs()  # This prints dialogs to CLI
-                ents = [r["dialog"].entity for r in rows]
-                return await self._run_with_source("all", ents)
-
-            else:
-                self._log_output(pad("Invalid choice. Canceled.", WIDTH, "left"), "yellow")
-                return True
-
-        except KeyboardInterrupt:
-            self._log_output(pad("Interrupted by user.", WIDTH, "left"), "red")
-            return False
-        except Exception as e:
-            self._log_output(pad(f"Unexpected error: {e}", WIDTH, "left"), "red")
-            return False
-        finally:
-            await self.client.disconnect()
-
 
 # ============================ CLI-SPECIFIC FUNCTIONS AND MAIN ENTRY =============================
 
 # CLI progress callback for download and upload
-def cli_progress_callback(progress: float, current: int, total: int, stats: Optional[Dict[
-    str, Any]] = None):  # Renamed current_bytes to current and total_bytes to total for download_all_media's specific needs
+def cli_progress_callback(
+        progress: float,
+        current: int,
+        # For download: current_files_processed; for upload: current_bytes_of_file (for single file) or current_file_index (for folder upload)
+        total: int,
+        # For download: total_files_to_process; for upload: total_bytes_of_file (for single file) or total_files (for folder upload)
+        stats: Optional[Dict[str, Any]] = None,  # Present for download, None for single file upload
+        current_file_bytes: Optional[int] = None,  # For folder upload, current bytes of current file
+        total_file_bytes: Optional[int] = None  # For folder upload, total bytes of current file
+):
     bar_length = 50
     filled_length = int(bar_length * progress)
     bar = '#' * filled_length + '-' * (bar_length - filled_length)
     percent = f"{progress * 100:.1f}"
 
-    # Adapt for both total items and total bytes for upload
     if stats:  # It's a download progress callback (from download_all_media)
-        # Use current and total items for the main bar, but show size from stats
         downloaded_size = stats.get('total_size', 0)
         sys.stdout.write(
             f'\rDownload: |{bar}| {percent}% ({current}/{total} files, {humanize.naturalsize(downloaded_size)} total)')
-    else:  # It's an upload progress callback (from upload_media)
+    elif current_file_bytes is not None and total_file_bytes is not None:  # It's a folder upload progress callback
+        # 'progress' here is overall_progress for folder, 'current' is current_file_index, 'total' is total_files
         sys.stdout.write(
-            f'\rUpload: |{bar}| {percent}% ({humanize.naturalsize(current)}/{humanize.naturalsize(total)})')
+            f'\rFolder Upload: [{current}/{total}] |{bar}| {percent}% (File: {humanize.naturalsize(current_file_bytes)}/{humanize.naturalsize(total_file_bytes)})')
+    else:  # It's a single file upload progress callback (current=current_bytes, total=total_bytes)
+        sys.stdout.write(
+            f'\rSingle Upload: |{bar}| {percent}% ({humanize.naturalsize(current)}/{humanize.naturalsize(total)})')
 
     sys.stdout.flush()
     if progress >= 1.0:
@@ -1192,7 +1221,7 @@ def cli_progress_callback(progress: float, current: int, total: int, stats: Opti
 # Dummy callback for scan progress in CLI, as total messages isn't known
 def cli_scan_progress_callback(current_messages_scanned: int, total_messages: Optional[int]):
     sys.stdout.write(
-        f'\rScanning... Scanned {current_messages_scanned} messages. Found {current_messages_scanned if total_messages is None else total_messages} media items.')
+        f'\rScanning... Scanned {current_messages_scanned} messages. Found {current_messages_scanned if total_messages is None else current_messages_scanned} media items.')  # Total media is from downloader.stats, not passed directly
     sys.stdout.flush()
 
 
@@ -1233,8 +1262,6 @@ async def run_cli_login(args):
     env_path = Path(".env")
     envd = load_env(env_path)
 
-    # For CLI login, if parameters are provided, use them directly for a new login or update.
-    # Otherwise, it will be interactive.
     _envd, _idx = await do_login_flow(envd, console_log_func, console_input_func,
                                       phone=args.phone, api_id=args.api_id,
                                       api_hash=args.api_hash, download_dir=args.download_dir,
@@ -1281,18 +1308,42 @@ async def run_cli_upload(args):
         return
 
     try:
-        file_path = Path(args.file)
+        file_or_folder_path = Path(args.path)
         destination = args.to
         caption = args.caption
 
-        console_log_func(pad(f"Starting upload of '{file_path.name}' to '{destination}'...", WIDTH, "left"), "blue")
-        await downloader.upload_media(
-            peer=destination,
-            file_path=file_path,
-            caption=caption,
-            progress_callback=cli_progress_callback
-        )
-        console_log_func(pad(f"Upload completed successfully for '{file_path.name}'.", WIDTH, "left"), "green")
+        if file_or_folder_path.is_file():
+            console_log_func(
+                pad(f"Starting upload of '{file_or_folder_path.name}' to '{destination}'...", WIDTH, "left"), "blue")
+            await downloader.upload_media(
+                peer=destination,
+                file_path=file_or_folder_path,
+                caption=caption,
+                progress_callback=lambda p, c_bytes, t_bytes: cli_progress_callback(p, c_bytes, t_bytes)
+            )
+            console_log_func(pad(f"Upload completed successfully for '{file_or_folder_path.name}'.", WIDTH, "left"),
+                             "green")
+        elif file_or_folder_path.is_dir():
+            console_log_func(
+                pad(f"Starting batch upload from folder '{file_or_folder_path.name}' to '{destination}'...", WIDTH,
+                    "left"), "blue")
+            await downloader.upload_folder_media(
+                peer=destination,
+                folder_path=file_or_folder_path,
+                caption=caption,
+                progress_callback=lambda overall_p, f_idx, total_f, c_bytes, t_bytes: cli_progress_callback(overall_p,
+                                                                                                            f_idx,
+                                                                                                            total_f,
+                                                                                                            None,
+                                                                                                            c_bytes,
+                                                                                                            t_bytes)
+            )
+            console_log_func(pad(f"Batch upload from '{file_or_folder_path.name}' completed.", WIDTH, "left"), "green")
+        else:
+            console_log_func(
+                pad(f"Error: Path '{file_or_folder_path}' is neither a file nor a directory.", WIDTH, "left"), "red")
+
+
     except Exception as e:
         console_log_func(pad(f"Error during upload: {e}", WIDTH, "left"), "red")
     finally:
@@ -1319,108 +1370,18 @@ async def run_cli_download(args):
         filter_type = args.filter
         dialog_selection = args.dialogs
 
-        media_list = []
-        selected_entities: List[Any] = []
+        # The _run_with_source method now handles the full scan/filter/download flow including state management
+        # It takes callbacks for progress and confirmation.
+        await downloader._run_with_source(
+            src_type=source_type,
+            chosen_entities=dialog_selection,
+            # For CLI, dialog_selection directly passed. _run_with_source will resolve to entities internally.
+            confirm_callback=lambda t, m: console_input_func(m + " (yes/no)", "no", False).lower() == 'yes',
+            progress_callback_scan=cli_scan_progress_callback,
+            progress_callback_download=cli_progress_callback
+        )
 
-        if source_type == "saved":
-            selected_entities = ['me']
-            await downloader._run_with_source("saved",
-                                              confirm_callback=lambda t, m: console_input_func(m + " (yes/no)", "no",
-                                                                                               False).lower() == 'yes',
-                                              progress_callback_scan=cli_scan_progress_callback,
-                                              progress_callback_download=cli_progress_callback)
-        elif source_type == "all":
-            dialogs_info = await downloader.list_dialogs()  # This prints dialogs to CLI
-            selected_entities = [d['entity'] for d in dialogs_info]
-            await downloader._run_with_source("all", selected_entities,
-                                              confirm_callback=lambda t, m: console_input_func(m + " (yes/no)", "no",
-                                                                                               False).lower() == 'yes',
-                                              progress_callback_scan=cli_scan_progress_callback,
-                                              progress_callback_download=cli_progress_callback)
-        elif source_type == "dialogs":
-            if not dialog_selection:
-                raise ValueError(
-                    "For 'dialogs' source, --dialogs argument is required (e.g., --dialogs 12345 @mychannel).")
-
-            console_log_func(pad("Fetching all dialogs to resolve selections...", WIDTH, "left"), "blue")
-            all_dialogs_from_api = await downloader.list_dialogs()  # This prints dialogs to CLI
-
-            for selector in dialog_selection:
-                found = False
-                try:  # Try by ID first
-                    target_id = int(selector)
-                    for d_info in all_dialogs_from_api:
-                        if hasattr(d_info["entity"], "id") and d_info["entity"].id == target_id:
-                            selected_entities.append(d_info["entity"])
-                            found = True
-                            break
-                except ValueError:  # Not an int, try by title/username
-                    for d_info in all_dialogs_from_api:
-                        title_lower = d_info['title'].lower()
-                        selector_lower = selector.lower()
-                        if title_lower == selector_lower:
-                            selected_entities.append(d_info["entity"])
-                            found = True
-                            break
-                        if hasattr(d_info["entity"], "username") and d_info["entity"].username and d_info[
-                            "entity"].username.lower() == selector_lower.lstrip('@'):
-                            selected_entities.append(d_info["entity"])
-                            found = True
-                            break
-                if not found:
-                    console_log_func(pad(f"Warning: Could not find dialog '{selector}'. Skipping.", WIDTH, "left"),
-                                     "yellow")
-
-            if not selected_entities:
-                raise ValueError("No valid dialogs selected for download.")
-
-            await downloader._run_with_source("dialogs", selected_entities,
-                                              confirm_callback=lambda t, m: console_input_func(m + " (yes/no)", "no",
-                                                                                               False).lower() == 'yes',
-                                              progress_callback_scan=cli_scan_progress_callback,
-                                              progress_callback_download=cli_progress_callback)
-        elif source_type == "continue":
-            console_log_func(pad("Attempting to continue last session...", WIDTH, "left"), "blue")
-            state_source = downloader.state.get_source()
-            if not state_source:
-                raise ValueError("No previous session found to continue.")
-
-            last_source_type = state_source.get("type")
-            last_dialog_ids = state_source.get("dialog_ids")
-
-            if last_source_type == "saved":
-                selected_entities = ['me']
-                await downloader._run_with_source("saved",
-                                                  confirm_callback=lambda t, m: console_input_func(m + " (yes/no)",
-                                                                                                   "no",
-                                                                                                   False).lower() == 'yes',
-                                                  progress_callback_scan=cli_scan_progress_callback,
-                                                  progress_callback_download=cli_progress_callback)
-            else:  # "dialogs" or "all"
-                console_log_func(pad("Fetching all dialogs to restore previous selection...", WIDTH, "left"), "blue")
-                all_dialogs_from_api = await downloader.list_dialogs()  # This prints dialogs to CLI
-                restored_entities = []
-                for d_info in all_dialogs_from_api:
-                    # state stores dialog_ids as int or 'me'
-                    if last_dialog_ids and hasattr(d_info["entity"], "id") and d_info["entity"].id in last_dialog_ids:
-                        restored_entities.append(d_info["entity"])
-                if not restored_entities:
-                    raise ValueError("Could not restore dialogs from previous session.")
-                selected_entities = restored_entities
-                await downloader._run_with_source(last_source_type, selected_entities,
-                                                  confirm_callback=lambda t, m: console_input_func(m + " (yes/no)",
-                                                                                                   "no",
-                                                                                                   False).lower() == 'yes',
-                                                  progress_callback_scan=cli_scan_progress_callback,
-                                                  progress_callback_download=cli_progress_callback)
-
-            # After _run_with_source completes, the downloader.state will have the chosen filter
-            # If a filter was specifically provided via CLI, it will override the last session's filter
-            # This is already handled in _run_with_source internally by default parameter logic.
-
-        else:
-            raise ValueError(f"Unknown source type: {source_type}. Choose from 'saved', 'dialogs', 'all', 'continue'.")
-
+        console_log_func(pad("Download command finished.", WIDTH, "left"), "green")
 
     except Exception as e:
         console_log_func(pad(f"Error during download: {e}", WIDTH, "left"), "red")
@@ -1454,10 +1415,11 @@ async def cli_main_entry():
     reset_parser = subparsers.add_parser("reset", help="Reset all configurations and delete session files.")
 
     # --- Upload Command ---
-    upload_parser = subparsers.add_parser("upload", help="Upload a file to Telegram.")
-    upload_parser.add_argument("-f", "--file", required=True, help="Path to the file to upload.")
+    upload_parser = subparsers.add_parser("upload", help="Upload a file or all media from a folder to Telegram.")
+    upload_parser.add_argument("-p", "--path", required=True,
+                               help="Path to the file or folder to upload.")  # Changed from --file
     upload_parser.add_argument("-t", "--to", required=True, help="Destination (chat ID, @username, or phone number).")
-    upload_parser.add_argument("-c", "--caption", default="", help="Optional caption for the file.")
+    upload_parser.add_argument("-c", "--caption", default="", help="Optional caption for the file(s).")
 
     # --- Download Command ---
     download_parser = subparsers.add_parser("download", help="Download media from Telegram.")
@@ -1487,8 +1449,6 @@ async def cli_main_entry():
     env_path = Path(".env")
     ensure_env_exists(env_path)
 
-    # All commands will reload envd from file, execute, and save it.
-    # No need for the main_menu loop now, as CLI args handle everything.
     if args.command == "login":
         await run_cli_login(args)
     elif args.command == "logout":
@@ -1501,7 +1461,22 @@ async def cli_main_entry():
         await run_cli_download(args)
     elif args.command == "status":
         envd = load_env(env_path)
-        print_account_status(envd, console_log_func)
+        # For CLI, print_account_status needs the active downloader's configured download_dir
+        # It's better to get the active account config first.
+        current_account_idx = get_current_account_index(envd)
+        if current_account_idx != 0:
+            cfg = get_account_config(envd, current_account_idx)
+            downloader_temp = TelegramDownloader(
+                api_id=int(cfg["API_ID"]), api_hash=cfg["API_HASH"], phone=cfg["PHONE"],
+                download_dir=cfg["DOWNLOAD_DIR"], account_index=current_account_idx,
+                log_func=console_log_func, input_func=console_input_func
+            )
+            lines = ["ACCOUNT STATUS", ""]
+            lines.extend(
+                [pad(s, WIDTH - 2) for s in downloader_temp.state.get_status_lines(downloader_temp.download_dir)])
+            console_log_func(c(box(lines), Fore.CYAN))
+        else:
+            console_log_func(c(pad("No active account selected for status.", WIDTH, "left"), Fore.YELLOW))
     else:
         parser.print_help()
 
@@ -1514,7 +1489,5 @@ if __name__ == "__main__":
     except Exception as e:
         console_log_func(pad(f"Fatal CLI error: {e}", WIDTH, "left"), "red")
         sys.exit(1)
-
-
 
 
