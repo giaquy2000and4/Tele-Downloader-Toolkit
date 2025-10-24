@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-
-
 import asyncio
 import os
 import sys
@@ -9,8 +6,9 @@ import re
 import json
 import signal
 import hashlib
+import argparse  # For CLI
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple, Callable
+from typing import List, Dict, Any, Optional, Tuple, Callable, Union
 from pathlib import Path
 
 try:
@@ -21,13 +19,13 @@ try:
         PhoneCodeExpiredError,
         PasswordHashInvalidError,
         FloodWaitError,
+        PeerFloodError  # Added PeerFloodError
     )
-    from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+    from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, User, Chat, Channel
 except ImportError as e:
     print(f"Missing package: {e}")
     print("Install: pip install telethon")
     sys.exit(1)
-
 
 try:
     from colorama import Fore, Style
@@ -45,7 +43,7 @@ except ImportError:
 try:
     from tqdm import tqdm
 except ImportError:
-        tqdm = lambda x, **kwargs: x
+    tqdm = lambda x, **kwargs: x
 
 try:
     import humanize
@@ -55,11 +53,13 @@ except ImportError as e:
     sys.exit(1)
 
 try:
-    from dotenv import load_dotenv
+    from dotenv import load_dotenv, set_key, dotenv_values
 except ImportError as e:
     print(f"Missing package: {e}")
     print("Install: pip install python-dotenv")
     sys.exit(1)
+
+import getpass  # For sensitive input in CLI
 
 # ============================ CẤU HÌNH UI (Console-specific, for default behavior) =============================
 
@@ -100,9 +100,42 @@ def box(lines: List[str], width: int = WIDTH) -> str:
     return f"{top}\n{inner}\n{bottom}"
 
 
+# Simple console logger
+def console_log_func(message: str, color_tag: Optional[str] = None):
+    color_map = {
+        "red": Fore.RED,
+        "green": Fore.GREEN,
+        "yellow": Fore.YELLOW,
+        "blue": Fore.BLUE,
+        "cyan": Fore.CYAN,
+        "reset": Style.RESET_ALL  # Not used directly but for completeness
+    }
+    prefix = color_map.get(color_tag, "")
+    suffix = Style.RESET_ALL if color_tag else ""
+    print(f"{prefix}{message}{suffix}")
+
+
+# Simple console input
+def console_input_func(prompt: str, default: Optional[str] = None, hide_input: bool = False) -> str:
+    if hide_input:
+        try:
+            return getpass.getpass(prompt + ": ")
+        except Exception:
+            # Fallback if getpass fails (e.g., non-interactive console)
+            console_log_func("Warning: getpass failed, input will be echoed.", "yellow")
+            return input(prompt + ": ")
+
+    full_prompt = prompt
+    if default is not None:
+        full_prompt += f" (default: {default})"
+
+    user_input = input(full_prompt + ": ")
+    return user_input.strip() or (default or "")
+
+
 # ============================ QUẢN LÝ .ENV =============================
 
-ENV_TEMPLATE = """# Multi-account Telegram Downloader
+ENV_TEMPLATE = """# Multi-account Telegram Tool
 CURRENT_ACCOUNT=0
 # Example:
 # ACCOUNT_1_PHONE=+84123456789
@@ -118,54 +151,20 @@ def ensure_env_exists(env_path: Path) -> None:
 
 
 def load_env(env_path: Path) -> Dict[str, str]:
-    load_dotenv(dotenv_path=str(env_path), override=True)
-    data = {}
-    try:
-        with env_path.open("r", encoding="utf-8") as f:
-            for line_ in f:
-                line_ = line_.strip()
-                if not line_ or line_.startswith("#"):
-                    continue
-                if "=" in line_:
-                    k, v = line_.split("=", 1)
-                    data[k.strip()] = v.strip()
-    except Exception:
-        pass
-    return data
+    # Use dotenv_values to get all current .env values
+    # set_key does not automatically load everything into os.environ,
+    # so we explicitly parse if needed for consistency across systems
+    load_dotenv(dotenv_path=str(env_path))  # ensure os.environ is updated
+    return dotenv_values(dotenv_path=str(env_path))
 
 
 def save_env(env_path: Path, data: Dict[str, str]) -> None:
-    lines = ["# Multi-account Telegram Downloader"]
-    cur = str(data.get("CURRENT_ACCOUNT", "0")).strip()
-    lines.append(f"CURRENT_ACCOUNT={cur}")
-    # Dump account blocks by index
-    indexes = sorted(
-        {int(k.split("_")[1]) for k in data.keys() if k.startswith("ACCOUNT_") and k.split("_")[1].isdigit()})
-    for idx in indexes:
-        for key in ["PHONE", "API_ID", "API_HASH", "DOWNLOAD_DIR"]:
-            dk = f"ACCOUNT_{idx}_{key}"
-            if dk in data:
-                lines.append(f"{dk}={data[dk]}")
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Use set_key to update .env file cleanly
+    for k, v in data.items():
+        set_key(dotenv_path=str(env_path), key_to_set=k, value_to_set=v)
 
-
-def pick_account_index(data: Dict[str, str], input_func: Callable[[str, Optional[str]], str],
-                       log_func: Callable[[str], None]) -> int:
-
-    idxs = sorted({int(k.split("_")[1]) for k in data.keys() if
-                   k.startswith("ACCOUNT_") and k.endswith("_PHONE") and k.split("_")[1].isdigit()})
-    if not idxs:
-        return 0
-    # hiển thị
-    lines = [pad("ACCOUNTS", WIDTH - 2)]
-    for i in idxs:
-        phone = data.get(f"ACCOUNT_{i}_PHONE", "")
-        lines.append(pad(f"[{i}] {phone}", WIDTH - 2))
-    log_func(c(box(lines), Fore.CYAN))
-    sel = input_func("Nhập index tài khoản muốn dùng: ").strip()
-    if sel.isdigit() and int(sel) in idxs:
-        return int(sel)
-    return 0
+    # After saving, reload to ensure internal state is consistent
+    load_dotenv(dotenv_path=str(env_path), override=True)
 
 
 def get_current_account_index(data: Dict[str, str]) -> int:
@@ -176,80 +175,223 @@ def get_current_account_index(data: Dict[str, str]) -> int:
 
 
 def get_account_config(data: Dict[str, str], idx: int) -> Dict[str, str]:
+    # Prioritize account-specific config, fallback to global defaults if idx=0 or not found
+    phone = data.get(f"ACCOUNT_{idx}_PHONE")
+    api_id = data.get(f"ACCOUNT_{idx}_API_ID")
+    api_hash = data.get(f"ACCOUNT_{idx}_API_HASH")
+    download_dir = data.get(f"ACCOUNT_{idx}_DOWNLOAD_DIR")
+
+    # If account-specific config is incomplete, try to use global defaults for 0
+    if not (phone and api_id and api_hash) and idx == 0:
+        phone = data.get("API_PHONE", phone)  # Fallback to a global API_PHONE if you have one
+        api_id = data.get("API_ID", api_id)
+        api_hash = data.get("API_HASH", api_hash)
+        download_dir = data.get("DOWNLOAD_DIR", download_dir)
+
     return {
-        "PHONE": data.get(f"ACCOUNT_{idx}_PHONE", ""),
-        "API_ID": data.get(f"ACCOUNT_{idx}_API_ID", ""),
-        "API_HASH": data.get(f"ACCOUNT_{idx}_API_HASH", ""),
-        "DOWNLOAD_DIR": data.get(f"ACCOUNT_{idx}_DOWNLOAD_DIR", ""),
+        "PHONE": phone if phone else "",
+        "API_ID": api_id if api_id else "",
+        "API_HASH": api_hash if api_hash else "",
+        "DOWNLOAD_DIR": download_dir if download_dir else "downloads",
     }
 
 
-def set_current_account_index(data: Dict[str, str], idx: int) -> Dict[str, str]:
-    data["CURRENT_ACCOUNT"] = str(idx)
-    return data
-
-
-def input_nonempty(prompt: str, input_func: Callable[[str, Optional[str]], str], default: Optional[str] = None) -> str:
-    p = prompt
-    while True:
-        val = input_func(p, default).strip()
-        if not val and default is not None:
-            return default
-        if val:
-            return val
-        print("Vui lòng nhập lại.")
-
-
-def do_login_flow(envd: Dict[str, str], input_func: Callable[[str, Optional[str]], str],
-                  log_func: Callable[[str], None]) -> Dict[str, str]:
-    idx = pick_account_index(envd, input_func, log_func)
-    if idx == 0:
-        existing_idxs = [int(k.split("_")[1]) for k in envd.keys() if
-                         k.startswith("ACCOUNT_") and k.endswith("_PHONE") and k.split("_")[1].isdigit()]
-        idx = 1 if not existing_idxs else max(existing_idxs) + 1
-
-    phone = input_nonempty("PHONE (kèm mã quốc gia)", input_func, envd.get(f"ACCOUNT_{idx}_PHONE", ""))
-    api_id = input_nonempty("API_ID", input_func, envd.get(f"ACCOUNT_{idx}_API_ID", ""))
-    api_hash = input_nonempty("API_HASH", input_func, envd.get(f"ACCOUNT_{idx}_API_HASH", ""))
-    download_dir = input_nonempty("DOWNLOAD_DIR (thư mục tuyệt đối hoặc tương đối)", input_func,
-                                  envd.get(f"ACCOUNT_{idx}_DOWNLOAD_DIR", "downloads"))
-
-    envd[f"ACCOUNT_{idx}_PHONE"] = phone
-    envd[f"ACCOUNT_{idx}_API_ID"] = api_id
-    envd[f"ACCOUNT_{idx}_API_HASH"] = api_hash
-    envd[f"ACCOUNT_{idx}_DOWNLOAD_DIR"] = download_dir
-    envd = set_current_account_index(envd, idx)
+def set_current_account_index(envd: Dict[str, str], idx: int) -> Dict[str, str]:
+    envd["CURRENT_ACCOUNT"] = str(idx)
     return envd
 
 
-def do_reset_flow(input_func: Callable[[str, Optional[str]], str], log_func: Callable[[str], None]) -> Dict[str, str]:
-    confirm = input_func("Bạn chắc chắn RESET .env? (yes/no): ").strip().lower()
-    if confirm == "yes":
-        return {"CURRENT_ACCOUNT": "0"}
-    else:
-        log_func("Huỷ RESET.")
-        return load_env(Path(".env"))  # Reload original env
+def find_next_account_index(envd: Dict[str, str]) -> int:
+    existing_idxs = {
+        int(k.split("_")[1])
+        for k in envd.keys()
+        if k.startswith("ACCOUNT_") and k.endswith("_PHONE") and k.split("_")[1].isdigit()
+    }
+    return 1 if not existing_idxs else max(existing_idxs) + 1
 
 
-def purge_session_files_for(account_index: int) -> None:
-    base = Path(f"sessions/session_{account_index}")
-    extensions = ["", ".session", ".session-journal"]
-    for ext in extensions:
-        path = base.with_suffix(ext)
-        try:
-            if path.exists():
-                path.unlink()
-        except Exception:
-            pass
+async def do_login_flow(
+        envd: Dict[str, str],
+        log_func: Callable[[str, Optional[str]], None],
+        input_func: Callable[[str, Optional[str], bool], str],
+        phone: Optional[str] = None,
+        api_id: Optional[int] = None,
+        api_hash: Optional[str] = None,
+        download_dir: Optional[str] = None,
+        account_idx_to_use: Optional[int] = None  # For explicitly selecting an existing index
+) -> Tuple[Dict[str, str], int]:
+    """Handles the interactive login flow for CLI/GUI."""
+
+    # If account_idx_to_use is not provided, try to pick one (CLI interactive) or use next available (GUI new account)
+    if account_idx_to_use is None:
+        accounts = []
+        idxs = sorted({
+            int(k.split("_")[1])
+            for k in envd.keys()
+            if k.startswith("ACCOUNT_") and k.endswith("_PHONE") and k.split("_")[1].isdigit()
+        })
+        for idx in idxs:
+            accounts.append({'id': idx, 'phone': envd[f"ACCOUNT_{idx}_PHONE"]})
+
+        if accounts:
+            log_func(pad("Existing accounts:", WIDTH, "left"), "blue")
+            for acc in accounts:
+                log_func(pad(f"  {acc['id']}: {acc['phone']}", WIDTH, "left"))
+
+            while True:
+                choice = input_func("Enter account index to use or 'new' to add a new account", hide_input=False)
+                if choice.lower() == 'new':
+                    account_idx_to_use = find_next_account_index(envd)
+                    break
+                try:
+                    chosen_idx = int(choice)
+                    if chosen_idx in idxs:
+                        account_idx_to_use = chosen_idx
+                        break
+                    else:
+                        log_func("Invalid index. Please try again.", "red")
+                except ValueError:
+                    log_func("Invalid input. Enter an index or 'new'.", "red")
+        else:
+            log_func("No existing accounts. Creating a new one.", "yellow")
+            account_idx_to_use = find_next_account_index(envd)
+
+    current_cfg = get_account_config(envd, account_idx_to_use)
+
+    # Prompt for missing info, or use provided args/env values
+    resolved_phone = phone or (current_cfg["PHONE"] if current_cfg["PHONE"] else None) or input_func(
+        "Enter phone number (e.g., +84123456789)", hide_input=False)
+    resolved_api_id_str = str(api_id) if api_id else (current_cfg["API_ID"] if current_cfg["API_ID"] else None)
+    if resolved_api_id_str is None:
+        while True:
+            try:
+                resolved_api_id_str = input_func("Enter API ID (from my.telegram.org)", hide_input=False)
+                int(resolved_api_id_str)  # Validate it's an int
+                break
+            except ValueError:
+                log_func("API ID must be a number.", "red")
+    resolved_api_hash = api_hash or (current_cfg["API_HASH"] if current_cfg["API_HASH"] else None) or input_func(
+        "Enter API Hash (from my.telegram.org)", hide_input=False)
+    resolved_download_dir = download_dir or (
+        current_cfg["DOWNLOAD_DIR"] if current_cfg["DOWNLOAD_DIR"] else None) or input_func("Enter download directory",
+                                                                                            default="downloads",
+                                                                                            hide_input=False)
+
+    # Update envd with resolved details for the selected index
+    envd[f"ACCOUNT_{account_idx_to_use}_PHONE"] = resolved_phone
+    envd[f"ACCOUNT_{account_idx_to_use}_API_ID"] = resolved_api_id_str
+    envd[f"ACCOUNT_{account_idx_to_use}_API_HASH"] = resolved_api_hash
+    envd[f"ACCOUNT_{account_idx_to_use}_DOWNLOAD_DIR"] = resolved_download_dir
+    envd = set_current_account_index(envd, account_idx_to_use)
+
+    # Initialize and connect downloader to verify credentials
+    downloader = TelegramDownloader(
+        api_id=int(resolved_api_id_str),
+        api_hash=resolved_api_hash,
+        phone=resolved_phone,
+        download_dir=resolved_download_dir,
+        account_index=account_idx_to_use,
+        log_func=log_func,
+        input_func=input_func
+    )
+
+    log_func(pad(f"Attempting to connect with account #{account_idx_to_use} ({resolved_phone})...", WIDTH, "left"),
+             "blue")
+    try:
+        if await downloader.connect_client():
+            log_func(pad(f"Successfully logged in with account #{account_idx_to_use}.", WIDTH, "left"), "green")
+            await downloader.client.disconnect()  # Disconnect after successful auth
+            return envd, account_idx_to_use
+        else:
+            log_func(pad("Login verification failed. Please check your credentials.", WIDTH, "left"), "red")
+            return envd, 0  # Return 0 for failure
+    except Exception as e:
+        log_func(pad(f"An error occurred during login verification: {e}", WIDTH, "left"), "red")
+        return envd, 0
 
 
-async def do_logout_flow(envd: Dict[str, str], log_func: Callable[[str], None]) -> Dict[str, str]:
-    idx = get_current_account_index(envd)
-    if idx == 0:
-        log_func(c(pad("Chưa đăng nhập. Không có phiên nào để logout.", WIDTH, "left"), Fore.YELLOW))
+async def do_logout_flow(
+        envd: Dict[str, str],
+        log_func: Callable[[str, Optional[str]], None],
+        account_index: Optional[int] = None
+) -> Dict[str, str]:
+    """Handles logout for a specific or current account."""
+    idx_to_logout = account_index if account_index is not None else get_current_account_index(envd)
+
+    if idx_to_logout == 0:
+        log_func(pad("No account is currently logged in or specified for logout.", WIDTH, "left"), "yellow")
         return envd
-    purge_session_files_for(idx)
-    log_func(c(pad("Đã xoá session local. Nếu muốn đăng nhập lại, chọn LOGIN.", WIDTH, "left"), Fore.GREEN))
+
+    log_func(pad(f"Logging out account #{idx_to_logout}...", WIDTH, "left"), "blue")
+
+    # Clear relevant env vars
+    envd.pop(f"ACCOUNT_{idx_to_logout}_PHONE", None)
+    envd.pop(f"ACCOUNT_{idx_to_logout}_API_ID", None)
+    envd.pop(f"ACCOUNT_{idx_to_logout}_API_HASH", None)
+    envd.pop(f"ACCOUNT_{idx_to_logout}_DOWNLOAD_DIR", None)
+
+    # If the current active account is being logged out, reset CURRENT_ACCOUNT
+    if get_current_account_index(envd) == idx_to_logout:
+        envd["CURRENT_ACCOUNT"] = "0"
+        log_func(pad("Current active account reset.", WIDTH, "left"), "yellow")
+
+    # Purge session file for this account
+    try:
+        session_file = Path("sessions") / f"session_{idx_to_logout}.session"
+        state_file = Path(f"session_{idx_to_logout}_state.json")  # State file might be directly in base dir
+        if session_file.exists():
+            session_file.unlink()
+            log_func(pad(f"Deleted session file: {session_file}", WIDTH, "left"), "blue")
+        if state_file.exists():
+            state_file.unlink()
+            log_func(pad(f"Deleted state file: {state_file}", WIDTH, "left"), "blue")
+
+    except Exception as e:
+        log_func(pad(f"Error purging session/state files for account #{idx_to_logout}: {e}", WIDTH, "left"), "red")
+
+    log_func(pad(f"Account #{idx_to_logout} logged out successfully.", WIDTH, "left"), "green")
+    return envd
+
+
+async def do_reset_flow(
+        envd: Dict[str, str],
+        log_func: Callable[[str, Optional[str]], None],
+        confirm: bool = False  # Added confirm parameter for GUI/CLI direct calls
+) -> Dict[str, str]:
+    """Resets all configurations and deletes all session files."""
+    if not confirm:
+        log_func(pad("Reset cancelled.", WIDTH, "left"), "yellow")
+        return envd
+
+    log_func(pad("Resetting all configurations and deleting all session files...", WIDTH, "left"), "red")
+
+    # Clear all account-specific entries and global API keys (if any)
+    keys_to_delete = [k for k in envd.keys() if k.startswith("ACCOUNT_") or k in ["API_ID", "API_HASH", "DOWNLOAD_DIR"]]
+    for key in keys_to_delete:
+        envd.pop(key, None)
+
+    envd["CURRENT_ACCOUNT"] = "0"  # Reset current account to 0
+
+    # Purge all session files
+    try:
+        session_dir = Path("sessions")
+        base_dir = Path(".")
+        if session_dir.exists():
+            for f in session_dir.iterdir():
+                if f.is_file() and f.name.startswith("session_"):
+                    f.unlink()
+            log_func(pad(f"Deleted all files in {session_dir}", WIDTH, "left"), "blue")
+
+        # Also check base directory for state files (e.g., session_1_state.json)
+        for f in base_dir.iterdir():
+            if f.is_file() and f.name.startswith("session_") and f.name.endswith("_state.json"):
+                f.unlink()
+        log_func(pad("Deleted all state files.", WIDTH, "left"), "blue")
+
+    except Exception as e:
+        log_func(pad(f"Error purging session/state files: {e}", WIDTH, "left"), "red")
+
+    log_func(pad("All configurations and session files have been reset.", WIDTH, "left"), "green")
     return envd
 
 
@@ -257,10 +399,10 @@ async def do_logout_flow(envd: Dict[str, str], log_func: Callable[[str], None]) 
 
 class StateManager:
 
-    def __init__(self, download_dir: Path, account_index: int):
-        self.download_dir = Path(download_dir)
-        self.state_file = self.download_dir / ".resume.json"
+    def __init__(self, account_index: int):  # Removed download_dir from __init__
         self.account_index = int(account_index)
+        # State file now in base directory, named with account index
+        self.state_file = Path(f"session_{self.account_index}_state.json")
         self.state = {
             "account_index": self.account_index,
             "source": {},  # {"type": "saved|dialogs|all", "dialog_ids": []}
@@ -285,6 +427,8 @@ class StateManager:
     def save(self):
         self.state["last_updated"] = datetime.utcnow().isoformat() + "Z"
         try:
+            # Ensure the directory for the state file exists (current directory)
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
             self.state_file.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
@@ -327,12 +471,12 @@ class StateManager:
             return f"Dialogs chọn lọc ({len(ids)} nguồn)"
         return "unknown"
 
-    def get_status_lines(self) -> list[str]:
+    def get_status_lines(self, download_dir: Path) -> list[str]:  # Added download_dir param
         return [
             f"Tài khoản: #{self.account_index}",
             f"Nguồn: {self.source_label()}",
             f"Tiến độ: {self.completed_count()}/{self.total_found()}",
-            f"Download dir: {self.download_dir}",
+            f"Download dir: {download_dir}",
             f"Hash media list: {self.state.get('ids_hash') or '-'}",
             f"Bộ lọc cuối: {self.state.get('last_filter', '3')}",
             f"Lần cập nhật: {self.state.get('last_updated') or '-'}",
@@ -355,7 +499,8 @@ class StateManager:
 
 class TelegramDownloader:
     def __init__(self, api_id: int, api_hash: str, phone: str, download_dir: str, account_index: int,
-                 log_func: Callable[[str, Optional[str]], None], input_func: Callable[[str, Optional[str]], str]):
+                 log_func: Callable[[str, Optional[str]], None],
+                 input_func: Callable[[str, Optional[str], bool], str]):  # Added hide_input to input_func type hint
 
         self.api_id = api_id
         self.api_hash = api_hash
@@ -379,7 +524,7 @@ class TelegramDownloader:
 
         # State per-account
         self.account_index = account_index
-        self.state = StateManager(self.download_dir, self.account_index)
+        self.state = StateManager(self.account_index)  # StateManager now takes only account_index
 
         self.stats = {
             'total_found': 0,
@@ -393,8 +538,9 @@ class TelegramDownloader:
 
     def print_banner(self) -> None:
         lines = [
-            pad("TELEGRAM SAVED MESSAGES DOWNLOADER", WIDTH - 2),
-            pad("UI-flexible · Multi-account · Login/Logout/Reset · Resume", WIDTH - 2),
+            pad("TELEGRAM MEDIA TOOL", WIDTH - 2),  # Updated title
+            pad("UI-flexible · Multi-account · Download · Upload · Login/Logout/Reset · Resume", WIDTH - 2),
+            # Updated subtitle
             pad(f"Download dir: {self.download_dir}", WIDTH - 2),
         ]
         self._log_output(c(box(lines), Fore.CYAN))
@@ -403,38 +549,42 @@ class TelegramDownloader:
     # --- Telethon Callbacks for input ---
     def _code_callback(self) -> str:
         """Callback for Telethon to get OTP code."""
-        return self._get_input("Nhập mã OTP: ")
+        return self._get_input("Enter the code from Telegram", hide_input=False)  # Pass hide_input=False
 
     def _password_callback(self) -> str:
         """Callback for Telethon to get 2FA password."""
-        return self._get_input("Nhập mật khẩu 2FA: ")
+        return self._get_input("Enter your 2FA password", hide_input=True)  # Pass hide_input=True for password masking
 
     async def connect_client(self) -> bool:
         try:
             await self.client.connect()
             if not await self.client.is_user_authorized():
-                self._log_output(pad("Signing in...", WIDTH, "left"))
+                self._log_output(pad("Authorization required. Signing in...", WIDTH, "left"))
                 try:
                     # In thông tin tài khoản đang đăng nhập (mask số điện thoại)
                     masked_phone = self.phone[:3] + "****" + self.phone[-4:]
                     self._log_output(
-                        c(pad(f"Đang đăng nhập tài khoản #{self.account_index} ({masked_phone}) → gửi mã...", WIDTH,
+                        c(pad(f"Attempting to login account #{self.account_index} ({masked_phone}) → sending code...",
+                              WIDTH,
                               "left"), Fore.YELLOW))
-                    await self.client.send_code_request(self.phone)  # Removed code_callback here, handled by sign_in
+                    await self.client.send_code_request(self.phone)
                 except FloodWaitError as e:
-                    self._log_output(c(pad(f"Quá nhiều lần thử. Hãy chờ {e.seconds} giây.", WIDTH, "left"), Fore.RED))
+                    self._log_output(
+                        c(pad(f"Too many attempts. Please wait {e.seconds} seconds.", WIDTH, "left"), Fore.RED))
                     return False
 
                 # Handle sign-in after code request
                 try:
-                    await self.client.sign_in(self.phone, code=self._code_callback())  # Pass blocking input function
+                    await self.client.sign_in(self.phone, code=self._code_callback())
                 except SessionPasswordNeededError:
-                    await self.client.sign_in(password=self._password_callback())  # Pass blocking input function
+                    await self.client.sign_in(password=self._password_callback())
                 except PhoneCodeInvalidError:
                     self._log_output(c(pad(" Wrong OTP, please try again", WIDTH, "left"), Fore.RED))
+                    # Allow a retry for OTP, but not handled automatically here (caller should decide)
                     return False
                 except PhoneCodeExpiredError:
-                    self._log_output(c(pad(" The OTP code has expired. Please resend the code", WIDTH, "left"), Fore.YELLOW))
+                    self._log_output(
+                        c(pad(" The OTP code has expired. Please resend the code", WIDTH, "left"), Fore.YELLOW))
                     return False
                 except PasswordHashInvalidError:
                     self._log_output(c(pad(" Incorrect 2FA password. Please try again.", WIDTH, "left"), Fore.RED))
@@ -476,11 +626,13 @@ class TelegramDownloader:
                 "username": uname,
                 "etype": etype,
             })
-        lines = [pad("LIST OF DIALOGS", WIDTH - 2), pad("", WIDTH - 2)]
-        for r in rows:
-            label = f"[{r['index']:>3}] {r['title']} {r['username']}  ({r['etype']})"
-            lines.append(pad(label, WIDTH - 2))
-        self._log_output(c(box(lines), Fore.CYAN))
+        # CLI print only - GUI will render its own
+        if self._log_output == console_log_func:  # Only print box for CLI
+            lines = [pad("LIST OF DIALOGS", WIDTH - 2), pad("", WIDTH - 2)]
+            for r in rows:
+                label = f"[{r['index']:>3}] {r['title']} {r['username']}  ({r['etype']})"
+                lines.append(pad(label, WIDTH - 2))
+            self._log_output(c(box(lines), Fore.CYAN))
         return rows
 
     async def scan_media_in_dialogs(self, dialogs: List[Any],
@@ -494,15 +646,19 @@ class TelegramDownloader:
             'downloaded': 0, 'skipped': 0, 'errors': 0, 'total_size': 0,
         }
 
-        # Use simple iteration if tqdm is not available (e.g., in GUI mode)
-        iterable_dialogs = tqdm(dialogs, desc="Scanning Dialogs", ncols=WIDTH, ascii=True,
-                                bar_format="{desc}: {n_fmt}/{total_fmt} |{bar}| {rate_fmt}") if tqdm else dialogs
+        # Use tqdm only if in CLI mode and tqdm is available
+        iterable_dialogs = dialogs
+        if self._log_output == console_log_func and tqdm is not type(
+                lambda x, **kwargs: x):  # Check if tqdm is actually imported
+            iterable_dialogs = tqdm(dialogs, desc="Scanning Dialogs", ncols=WIDTH, ascii=True,
+                                    bar_format="{desc}: {n_fmt}/{total_fmt} |{bar}| {rate_fmt}")
 
         for d in iterable_dialogs:
             async for message in self.client.iter_messages(d):
                 message_count += 1
                 if progress_callback:
-                    # Pass a dummy total for now, actual total media unknown until scan complete
+                    # Pass total found media, total messages is hard to get upfront
+                    # For GUI, we might pass (current_messages_scanned, total_dialog_messages)
                     progress_callback(message_count, None)
 
                 if not getattr(message, "media", None):
@@ -521,8 +677,9 @@ class TelegramDownloader:
                         media_messages.append({'message': message, 'type': 'photo', 'date': message.date})
 
         self.stats['total_found'] = len(media_messages)
+        # Final update for CLI progress if it was counting messages scanned
         if progress_callback:
-            progress_callback(message_count, message_count)  # Final count with total messages scanned
+            progress_callback(message_count, message_count)
 
         self._log_output(
             pad(f"Found {len(media_messages)} media in {message_count} messages across {len(dialogs)} dialog(s).",
@@ -531,7 +688,7 @@ class TelegramDownloader:
         return media_messages
 
     async def scan_saved_messages(self, progress_callback: Optional[Callable[[int, Optional[int]], None]] = None) -> \
-    List[Dict[str, Any]]:
+            List[Dict[str, Any]]:
         self._log_output(pad("Scanning Saved Messages...", WIDTH, "left"))
         media_messages: List[Dict[str, Any]] = []
         message_count = 0
@@ -582,9 +739,15 @@ class TelegramDownloader:
     def _target_path_for(self, media_info: Dict[str, Any]) -> Path:
         message = media_info['message']
         file_type = media_info['type']
+
+        # Create year/month subfolders
+        year_folder = self.download_dir / str(message.date.year)
+        month_folder = year_folder / f"{message.date.month:02d}"
+        month_folder.mkdir(parents=True, exist_ok=True)  # Ensure path exists
+
         if file_type == 'photo':
-            return self.pic_dir / f"photo_{message.id}.jpg"
-        else:
+            return month_folder / f"photo_{message.id}.jpg"
+        else:  # video
             doc = message.media.document
             mime = getattr(doc, "mime_type", "") or ""
             orig_name = None
@@ -593,7 +756,7 @@ class TelegramDownloader:
                     orig_name = attr.file_name
                     break
             ext = self._ext_from_mime_or_name(mime, orig_name)
-            return self.vid_dir / f"video_{message.id}{ext}"
+            return month_folder / f"video_{message.id}{ext}"
 
     @staticmethod
     def _hash_ids(ids: List[int]) -> str:
@@ -625,7 +788,7 @@ class TelegramDownloader:
         ]
         self._log_output(c(box(lines), Fore.YELLOW))
         p = "Your choice"
-        choice = self._get_input(p, default).strip()
+        choice = self._get_input(p, default, hide_input=False).strip()
         self._log_output(line("-"))
         return choice
 
@@ -640,64 +803,162 @@ class TelegramDownloader:
         total_items = len(media_list)
         current_processed = 0
 
-        # Use simple iteration if tqdm is not available or if in GUI mode
-        iterable_media = tqdm(media_list, total=total_items, desc="Downloading", unit="file", ncols=WIDTH, ascii=True,
-                              bar_format="{desc}: {n_fmt}/{total_fmt} |{bar}| {rate_fmt}") if tqdm else media_list
+        # Use tqdm only if in CLI mode and tqdm is available
+        iterable_media = media_list
+        if self._log_output == console_log_func and tqdm is not type(lambda x, **kwargs: x):
+            iterable_media = tqdm(media_list, total=total_items, desc="Downloading", unit="file", ncols=WIDTH,
+                                  ascii=True,
+                                  bar_format="{desc}: {n_fmt}/{total_fmt} |{bar}| {rate_fmt}")
 
         for item in iterable_media:
             if stop_flag():
-                self._log_output("Download stopped by user.", "red")
+                self._log_output(pad("Download stopped by user.", WIDTH, "left"), "red")
                 break
 
             msg = item["message"]
             target_path = self._target_path_for(item)
-            target_dir = target_path.parent
-            target_dir.mkdir(exist_ok=True)
 
-            # Check if already exists
+            # Use message.peer_id to get dialog ID for StateManager
+            dialog_id = getattr(msg.peer_id, 'user_id',
+                                getattr(msg.peer_id, 'channel_id', getattr(msg.peer_id, 'chat_id', None)))
+            if dialog_id is None:  # For 'Saved Messages' (msg.peer_id might be None for older versions)
+                dialog_id = msg.sender_id  # Fallback to sender_id
+            if dialog_id is None: dialog_id = -1  # A generic ID for 'me' or if sender also None
+
+            # Check if already completed from state or file exists
             if self.state.is_completed(int(msg.id)) or (target_path.exists() and os.path.getsize(target_path) > 0):
                 self.stats['skipped'] += 1
-                self.state.mark_completed(int(msg.id))
-                if isinstance(iterable_media, tqdm): iterable_media.update(1)  # Update tqdm if using
+                self.state.mark_completed(int(msg.id))  # Ensure marked as completed
+                if isinstance(iterable_media, tqdm): iterable_media.update(1)
             else:
                 try:
+                    self._log_output(pad(f"Downloading Message ID {msg.id} to {target_path.name}...", WIDTH, "left"),
+                                     "blue")
                     path = await self.client.download_media(msg, file=str(target_path))
-                    if path and os.path.exists(path):
+
+                    if path and Path(path).exists():
                         size = os.path.getsize(path)
                         self.stats['downloaded'] += 1
                         self.stats['total_size'] += size
                         self.state.mark_completed(int(msg.id))
+                        self._log_output(pad(f"Successfully downloaded: {target_path.name}", WIDTH, "left"), "green")
                     else:
-                        self.stats['errors'] += 1
+                        raise Exception("Downloaded file path is invalid or file not found.")
+
+                except FloodWaitError as e:
+                    self._log_output(
+                        pad(f"Flood wait error while downloading: Waiting {e.seconds} seconds...", WIDTH, "left"),
+                        "yellow")
+                    await asyncio.sleep(e.seconds + 5)
+                    self.stats['errors'] += 1
+                except PeerFloodError:
+                    self._log_output(
+                        pad(f"Peer flood error. Too many requests to this peer. Skipping for now.", WIDTH, "left"),
+                        "yellow")
+                    self.stats['errors'] += 1
                 except Exception as e:
                     self.stats['errors'] += 1
-                    self._log_output(f"Download error (msg {msg.id}): {e}", "red")
-                if isinstance(iterable_media, tqdm): iterable_media.update(1)  # Update tqdm if using
+                    self._log_output(pad(f"Error downloading message ID {msg.id}: {e}", WIDTH, "left"), "red")
+                if isinstance(iterable_media, tqdm): iterable_media.update(1)
 
             current_processed += 1
             progress = current_processed / total_items if total_items > 0 else 0
             if progress_callback:
+                # progress, current_items_processed, total_items_to_process, current_stats
                 progress_callback(progress, current_processed, total_items, self.stats.copy())
+
+        # Ensure final progress update
+        if progress_callback:
+            progress_callback(1.0, total_items, total_items, self.stats.copy())
+
+        self._log_output(pad("All media download attempts processed.", WIDTH, "left"), "blue")
+
+    # ===================== NEW UPLOAD METHOD =====================
+    async def upload_media(
+            self,
+            peer: Union[User, Chat, Channel, int, str],
+            file_path: Path,
+            caption: Optional[str] = None,
+            progress_callback: Optional[Callable[[float, int, int], None]] = None
+    ):
+        """
+        Uploads a media file to a specified peer (user/chat/channel).
+        """
+        if not self.client.is_connected():
+            raise ConnectionError("Telegram client is not connected. Please ensure you are logged in.")
+
+        if not file_path.is_file():
+            self._log_output(pad(f"File not found at '{file_path}'.", WIDTH, "left"), "red")
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        # Get entity of peer if it's ID or username
+        peer_entity = None
+        try:
+            if isinstance(peer, (int, str)):
+                self._log_output(pad(f"Resolving destination '{peer}'...", WIDTH, "left"), "blue")
+                peer_entity = await self.client.get_entity(peer)
+            else:
+                peer_entity = peer
+
+            # Use entity's title or first_name for logging
+            peer_name = peer_entity.title if hasattr(peer_entity, 'title') else peer_entity.first_name if hasattr(
+                peer_entity, 'first_name') else str(peer)
+            self._log_output(pad(f"Attempting to upload '{file_path.name}' to '{peer_name}'...", WIDTH, "left"), "blue")
+
+        except Exception as e:
+            self._log_output(pad(f"Error resolving destination '{peer}': {e}", WIDTH, "left"), "red")
+            raise ValueError(f"Invalid destination '{peer}'. Please check the ID or username.") from e
+
+        try:
+            # Telethon's send_file can take a progress_callback
+            # The callback arguments are (current, total) bytes
+            def telethon_progress_adapter(current, total):
+                if progress_callback:
+                    progress = current / total if total > 0 else 0
+                    progress_callback(progress, current, total)
+
+            message = await self.client.send_file(
+                peer_entity,
+                file=str(file_path),
+                caption=caption,
+                progress_callback=telethon_progress_adapter
+            )
+            self._log_output(
+                pad(f"Successfully uploaded '{file_path.name}' to '{peer_name}'. Message ID: {message.id}", WIDTH,
+                    "left"), "green")
+            return message
+        except Exception as e:
+            self._log_output(pad(f"Error uploading '{file_path.name}' to '{peer_name}': {e}", WIDTH, "left"), "red")
+            raise  # Re-raise for GUI/CLI to catch and display
 
     # ===================== CHẠY THEO NGUỒN =======================
 
     async def _run_with_source(self, src_type: str, chosen_entities: Optional[List[Any]] = None,
-                               confirm_callback: Optional[Callable[[str, str], bool]] = None) -> bool:
+                               confirm_callback: Optional[Callable[[str, str], bool]] = None,
+                               # For GUI confirmation dialog
+                               progress_callback_scan: Optional[Callable[[int, Optional[int]], None]] = None,
+                               # For GUI scan progress
+                               progress_callback_download: Optional[
+                                   Callable[[float, int, int, Dict[str, Any]], None]] = None
+                               # For GUI download progress
+                               ) -> bool:
         """
         Thực thi chu trình quét + tải theo nguồn đã biết.
         src_type: "saved" | "dialogs" | "all"
         chosen_entities: danh sách entity (nếu dialogs/all), có thể None nếu saved
         confirm_callback: a callable (title, message) for user confirmation (e.g., reset progress)
+        progress_callback_scan: a callable (current_messages_scanned, total_messages_in_dialog) for scan updates.
+        progress_callback_download: a callable (progress, current_items_processed, total_items_to_process, current_stats) for UI updates.
         """
         # 1) Scan theo nguồn
         if src_type == "saved":
-            media_list = await self.scan_saved_messages()
+            media_list = await self.scan_saved_messages(progress_callback_scan)
             dialog_ids = ["me"]
         else:
             if chosen_entities is None:
-                self._log_output(pad("Không có entities để quét.", WIDTH, "left"))
+                self._log_output(pad("Không có entities để quét.", WIDTH, "left"), "red")
                 return True
-            media_list = await self.scan_media_in_dialogs(chosen_entities)
+            media_list = await self.scan_media_in_dialogs(chosen_entities, progress_callback_scan)
             # rút id entity (int)
             dialog_ids = []
             for ent in chosen_entities:
@@ -707,7 +968,7 @@ class TelegramDownloader:
                     pass
 
         if not media_list:
-            self._log_output(pad("No media found.", WIDTH, "left"))
+            self._log_output(pad("No media found.", WIDTH, "left"), "yellow")
             return True
 
         # 2) Tính hash danh sách message ids
@@ -719,47 +980,60 @@ class TelegramDownloader:
         hash_mismatch = False
         if prev_source and prev_source.get("type") == src_type:
             # so khớp danh sách dialog ids (bỏ các 0)
-            prev_ids = [int(x) if str(x).isdigit() else -1 for x in prev_source.get("dialog_ids", [])]
-            cur_ids = [int(x) if str(x).isdigit() else -1 for x in dialog_ids]
-            if sorted(prev_ids) == sorted(cur_ids):
+            prev_dialog_ids = [int(x) if isinstance(x, (int, str)) and str(x).isdigit() else -1 for x in
+                               prev_source.get("dialog_ids", [])]
+            cur_dialog_ids = [int(x) if isinstance(x, (int, str)) and str(x).isdigit() else -1 for x in dialog_ids]
+
+            if sorted(prev_dialog_ids) == sorted(cur_dialog_ids):
                 # so khớp hash
                 prev_hash = self.state.state.get("ids_hash", "")
                 if prev_hash and prev_hash != ids_hash:
                     hash_mismatch = True
 
         # 4) Lưu source + total + hash (và giữ last_filter cũ)
+        # Note: self.state.set_source will save the state automatically
         self.state.set_source(src_type, dialog_ids, total_found=len(media_list), ids_hash=ids_hash)
 
         # 5) Nếu hash khác -> hỏi reset
         if hash_mismatch:
             self._log_output(
-                c(pad("Danh sách media đã thay đổi so với lần trước (hash khác).", WIDTH, "left"), Fore.YELLOW))
-            if confirm_callback and confirm_callback("Confirm Reset Progress",
-                                                     "Media list has changed since last session. Reset progress?"):
-                self.state.clear_progress()
-                self._log_output(c(pad("Đã reset tiến độ.", WIDTH, "left"), Fore.CYAN))
-            else:  # Fallback to console input if no callback or user declines
-                ans = self._get_input("Reset tiến độ để quét/tải lại từ đầu? (yes/no) [no]: ", "no").strip().lower()
+                c(pad("Media list changed since last session (hash mismatch).", WIDTH, "left"), Fore.YELLOW))
+            should_reset = False
+            if confirm_callback:
+                should_reset = confirm_callback("Confirm Reset Progress",
+                                                "Media list has changed since last session. Reset progress?")
+            else:  # Fallback to console input if no GUI callback
+                ans = self._get_input(
+                    pad("Reset progress to rescan/redownload from scratch? (yes/no) [no]", WIDTH, "left"), "no",
+                    hide_input=False).strip().lower()
                 self._log_output(line("-"))
                 if ans == "yes":
-                    self.state.clear_progress()
-                    self._log_output(c(pad("Đã reset tiến độ.", WIDTH, "left"), Fore.CYAN))
+                    should_reset = True
+
+            if should_reset:
+                self.state.clear_progress()
+                self._log_output(c(pad("Progress reset.", WIDTH, "left"), Fore.CYAN))
+            else:
+                self._log_output(c(pad("Continuing with existing progress.", WIDTH, "left"), Fore.YELLOW))
 
         # 6) In stats + chọn filter (mặc định lấy last_filter)
-        self.print_stats()
-        choice = self.prompt_download_choice(default=self.state.get_last_filter())
+        if self._log_output == console_log_func:  # Only print for CLI
+            self.print_stats()
+
+        choice = self.prompt_download_choice(
+            default=self.state.get_last_filter()) if self._log_output == console_log_func else self.state.get_last_filter()  # GUI will set filter directly
         if choice not in {"1", "2", "3"}:
-            self._log_output(pad("Canceled by user choice.", WIDTH, "left"))
+            self._log_output(pad("Canceled by user choice.", WIDTH, "left"), "yellow")
             return True
         # lưu bộ lọc vào state
         self.state.set_source(src_type, dialog_ids, total_found=len(media_list), ids_hash=ids_hash, last_filter=choice)
 
         # 7) Lọc theo loại
-        if choice == "1":
+        if choice == "1":  # Photos only
             filtered = [m for m in media_list if m['type'] == 'photo']
-        elif choice == "2":
+        elif choice == "2":  # Videos only
             filtered = [m for m in media_list if m['type'] == 'video']
-        else:
+        else:  # Both photos & videos or invalid filter (default to both)
             filtered = media_list
 
         # 8) Áp dụng resume: bỏ completed + file tồn tại
@@ -767,60 +1041,64 @@ class TelegramDownloader:
         for m in filtered:
             mid = int(m['message'].id)
             target = self._target_path_for(m)
+            # Note: _target_path_for now creates intermediate directories automatically
+            # So, we only need to check if the file itself exists and is not zero-sized
             if self.state.is_completed(mid) or (target.exists() and os.path.getsize(target) > 0):
                 self.stats['skipped'] += 1
                 continue
             resumable.append(m)
 
         if not resumable:
-            self._log_output(pad("Không còn item nào cần tải (đã hoàn tất).", WIDTH, "left"))
-            self.print_stats()
+            self._log_output(pad("No items left to download (all completed).", WIDTH, "left"), "green")
+            if self._log_output == console_log_func: self.print_stats()  # Only print for CLI
             return True
 
         # 9) Tải
         start_time = time.time()
-        await self.download_all_media(resumable, stop_flag=lambda: False)  # No stop flag in console, or provide dummy
+        # Pass the stop_flag and progress_callback_download directly
+        await self.download_all_media(resumable, stop_flag=lambda: False,
+                                      progress_callback=progress_callback_download)  # CLI does not typically have an external stop_flag or UI progress, unless passed.
         elapsed = time.time() - start_time
-        self._log_output(pad("Download finished.", WIDTH, "left"))
-        self._log_output(pad(f"Elapsed: {humanize.naturaldelta(elapsed)}", WIDTH, "left"))
-        self.print_stats()
+        self._log_output(pad("Download finished.", WIDTH, "left"), "blue")
+        self._log_output(pad(f"Elapsed: {humanize.naturaldelta(elapsed)}", WIDTH, "left"), "blue")
+        if self._log_output == console_log_func: self.print_stats()
         if self.stats['downloaded'] > 0 and elapsed > 0:
             avg_speed = self.stats['total_size'] / elapsed
-            self._log_output(pad(f"Average speed: {humanize.naturalsize(avg_speed)}/s", WIDTH, "left"))
+            self._log_output(pad(f"Average speed: {humanize.naturalsize(avg_speed)}/s", WIDTH, "left"), "blue")
         return True
 
-    # ===================== LUỒNG CHÍNH =======================
+    # ===================== LUỒNG CHÍNH (CLI) =======================
 
-    async def run(self, confirm_callback: Optional[Callable[[str, str], bool]] = None) -> bool:
+    async def run_cli_main_loop(self) -> bool:  # Renamed from run to avoid conflict and specify CLI context
         self.print_banner()
         if not await self.connect_client():
             return False
         try:
             # NGUỒN QUÉT
             lines = [
-                pad("Chọn NGUỒN để quét media:", WIDTH - 2),
+                pad("Select SOURCE to scan media:", WIDTH - 2),
                 pad("1) Saved Messages (me)", WIDTH - 2),
-                pad("2) Chọn dialogs/channels cụ thể", WIDTH - 2),
-                pad("3) Tất cả dialogs/channels", WIDTH - 2),
+                pad("2) Select specific dialogs/channels", WIDTH - 2),
+                pad("3) All dialogs/channels", WIDTH - 2),
                 pad("4) Continue LAST SESSION", WIDTH - 2),
             ]
             self._log_output(c(box(lines), Fore.YELLOW))
-            src_choice = self._get_input("Your choice: ").strip()
+            src_choice = self._get_input("Your choice", hide_input=False).strip()
             self._log_output(line("-"))
 
             if src_choice == "4":
                 # Continue last session
                 prev = self.state.get_source()
                 if not prev or not prev.get("type"):
-                    self._log_output(pad("Chưa có phiên trước để tiếp tục.", WIDTH, "left"))
+                    self._log_output(pad("No previous session to continue.", WIDTH, "left"), "yellow")
                     return True
                 typ = prev.get("type")
                 if typ == "saved":
-                    return await self._run_with_source("saved", confirm_callback=confirm_callback)
+                    return await self._run_with_source("saved")
                 else:
                     # dựng lại entities từ id
                     want_ids = [int(x) for x in prev.get("dialog_ids", []) if str(x).isdigit() and int(x) != 0]
-                    rows = await self.list_dialogs()
+                    rows = await self.list_dialogs()  # This prints dialogs to CLI
                     ents = []
                     for r in rows:
                         try:
@@ -829,23 +1107,25 @@ class TelegramDownloader:
                         except Exception:
                             pass
                     if not ents:
-                        self._log_output(pad("Không khôi phục được danh sách dialogs từ phiên trước.", WIDTH, "left"))
+                        self._log_output(pad("Could not restore dialog list from previous session.", WIDTH, "left"),
+                                         "yellow")
                         return True
-                    return await self._run_with_source(typ, ents, confirm_callback=confirm_callback)
+                    return await self._run_with_source(typ, ents)
 
             if src_choice == "1":
-                return await self._run_with_source("saved", confirm_callback=confirm_callback)
+                return await self._run_with_source("saved")
 
             elif src_choice == "2":
-                rows = await self.list_dialogs()
+                rows = await self.list_dialogs()  # This prints dialogs to CLI
                 if not rows:
-                    self._log_output(pad("Không có dialog nào.", WIDTH, "left"))
+                    self._log_output(pad("No dialogs found.", WIDTH, "left"), "yellow")
                     return True
-                self._log_output(pad("Nhập chỉ số dialogs muốn quét (ví dụ: 1,3,5-7). Enter để huỷ.", WIDTH, "left"))
-                pick = self._get_input("Pick: ").strip()
+                self._log_output(
+                    pad("Enter indexes of dialogs to scan (e.g.: 1,3,5-7). Enter to cancel.", WIDTH, "left"))
+                pick = self._get_input("Pick", hide_input=False).strip()
                 self._log_output(line("-"))
                 if not pick:
-                    self._log_output(pad("Huỷ bởi người dùng.", WIDTH, "left"))
+                    self._log_output(pad("Canceled by user.", WIDTH, "left"), "yellow")
                     return True
 
                 selected = set()
@@ -861,194 +1141,380 @@ class TelegramDownloader:
 
                 chosen = [r["dialog"].entity for r in rows if r["index"] in selected]
                 if not chosen:
-                    self._log_output(pad("Không có lựa chọn hợp lệ.", WIDTH, "left"))
+                    self._log_output(pad("No valid selection.", WIDTH, "left"), "yellow")
                     return True
-                return await self._run_with_source("dialogs", chosen, confirm_callback=confirm_callback)
+                return await self._run_with_source("dialogs", chosen)
 
             elif src_choice == "3":
-                rows = await self.list_dialogs()
+                rows = await self.list_dialogs()  # This prints dialogs to CLI
                 ents = [r["dialog"].entity for r in rows]
-                return await self._run_with_source("all", ents, confirm_callback=confirm_callback)
+                return await self._run_with_source("all", ents)
 
             else:
-                self._log_output(pad("Lựa chọn không hợp lệ. Huỷ.", WIDTH, "left"))
+                self._log_output(pad("Invalid choice. Canceled.", WIDTH, "left"), "yellow")
                 return True
 
         except KeyboardInterrupt:
-            self._log_output(pad("Interrupted by user.", WIDTH, "left"))
+            self._log_output(pad("Interrupted by user.", WIDTH, "left"), "red")
             return False
         except Exception as e:
-            self._log_output(pad(f"Unexpected error: {e}", WIDTH, "left"))
+            self._log_output(pad(f"Unexpected error: {e}", WIDTH, "left"), "red")
             return False
         finally:
             await self.client.disconnect()
 
 
-# ============================ MENU PHỤ TRỢ (Console-specific) =============================
+# ============================ CLI-SPECIFIC FUNCTIONS AND MAIN ENTRY =============================
 
-# Default console log function
-def console_log_func(message: str, color: Optional[str] = None):
-    # 'color' parameter for future use if needed, for now just prints
-    print(message)
+# CLI progress callback for download and upload
+def cli_progress_callback(progress: float, current: int, total: int, stats: Optional[Dict[
+    str, Any]] = None):  # Renamed current_bytes to current and total_bytes to total for download_all_media's specific needs
+    bar_length = 50
+    filled_length = int(bar_length * progress)
+    bar = '#' * filled_length + '-' * (bar_length - filled_length)
+    percent = f"{progress * 100:.1f}"
 
+    # Adapt for both total items and total bytes for upload
+    if stats:  # It's a download progress callback (from download_all_media)
+        # Use current and total items for the main bar, but show size from stats
+        downloaded_size = stats.get('total_size', 0)
+        sys.stdout.write(
+            f'\rDownload: |{bar}| {percent}% ({current}/{total} files, {humanize.naturalsize(downloaded_size)} total)')
+    else:  # It's an upload progress callback (from upload_media)
+        sys.stdout.write(
+            f'\rUpload: |{bar}| {percent}% ({humanize.naturalsize(current)}/{humanize.naturalsize(total)})')
 
-# Default console input function
-def console_input_func(prompt: str, default: Optional[str] = None) -> str:
-    full_prompt = prompt
-    if default is not None:
-        full_prompt += f" [{default}]"
-    full_prompt += ": "
-    return input(full_prompt)
-
-
-def print_account_status(envd: Dict[str, str], log_func: Callable[[str, Optional[str]], None]) -> None:
-    idx = get_current_account_index(envd)
-    if idx == 0:
-        log_func(c(pad("Chưa chọn tài khoản.", WIDTH, "left"), Fore.YELLOW))
-        return
-    cfg = get_account_config(envd, idx)
-    dldir = cfg.get("DOWNLOAD_DIR", "").strip() or "downloads"
-    sm = StateManager(Path(dldir), idx)
-    lines = [pad("ACCOUNT STATUS", WIDTH - 2), ""]
-    lines.extend([pad(s, WIDTH - 2) for s in sm.get_status_lines()])
-    log_func(c(box(lines), Fore.CYAN))
+    sys.stdout.flush()
+    if progress >= 1.0:
+        sys.stdout.write('\n')
 
 
-async def run_downloader_with_env(envd: Dict[str, str]) -> None:
-    idx = get_current_account_index(envd)
-    if idx == 0:
-        console_log_func(c(pad("Chưa chọn tài khoản. Vào LOGIN để cấu hình.", WIDTH, "left"), Fore.YELLOW))
-        return
-    cfg = get_account_config(envd, idx)
-    missing = [k for k, v in cfg.items() if not str(v).strip()]
-    if missing:
-        console_log_func(c(pad(f"Thiếu cấu hình: {', '.join(missing)}", WIDTH, "left"), Fore.RED))
-        return
-    Path(cfg["DOWNLOAD_DIR"]).mkdir(parents=True, exist_ok=True)
-    app = TelegramDownloader(
-        api_id=int(cfg["API_ID"]),
-        api_hash=str(cfg["API_HASH"]),
-        phone=str(cfg["PHONE"]),
-        download_dir=str(cfg["DOWNLOAD_DIR"]),
-        account_index=idx,  # per-account state
-        log_func=console_log_func,
-        input_func=console_input_func,
-    )
-    await app.run()
+# Dummy callback for scan progress in CLI, as total messages isn't known
+def cli_scan_progress_callback(current_messages_scanned: int, total_messages: Optional[int]):
+    sys.stdout.write(
+        f'\rScanning... Scanned {current_messages_scanned} messages. Found {current_messages_scanned if total_messages is None else total_messages} media items.')
+    sys.stdout.flush()
 
 
-def main_menu() -> int:
-    lines = [
-        pad("MAIN MENU", WIDTH - 2),
-        pad("1) LOGIN  - cấu hình/đổi tài khoản", WIDTH - 2),
-        pad("2) LOGOUT - xoá session local", WIDTH - 2),
-        pad("3) RESET  - xoá .env về mặc định", WIDTH - 2),
-        pad("4) EXIT", WIDTH - 2),
-        pad("5) STATUS - xem tiến độ tài khoản hiện tại", WIDTH - 2),
-        pad("6) CONTINUE LAST SESSION", WIDTH - 2),
-        pad("0) EXIT (phím khác)", WIDTH - 2),
-        pad("", WIDTH - 2),
-        pad("Hoặc nhấn Enter để CHẠY DOWNLOADER ngay với tài khoản hiện tại.", WIDTH - 2),
-    ]
-    console_log_func(c(box(lines), Fore.GREEN))
-    raw = console_input_func("Chọn: ").strip()
-    console_log_func(line("-"))
-    if raw == "":
-        return 9  # run immediately
+async def initialize_downloader(envd: Dict[str, str], account_index: int) -> Optional[TelegramDownloader]:
+    """Helper to initialize and connect the downloader for CLI commands."""
+    cfg = get_account_config(envd, account_index)
+
+    if not all([cfg["PHONE"], cfg["API_ID"], cfg["API_HASH"]]):
+        console_log_func(
+            pad(f"Account configuration for index {account_index} is incomplete. Please ensure PHONE, API_ID, API_HASH are set.",
+                WIDTH, "left"), "red")
+        return None
+
     try:
-        val = int(raw)
-        return val
-    except Exception:
-        return 0
+        api_id_int = int(cfg["API_ID"])
+    except ValueError:
+        console_log_func(
+            pad(f"Invalid API_ID '{cfg['API_ID']}' for account #{account_index}. Must be a number.", WIDTH, "left"),
+            "red")
+        return None
+
+    downloader = TelegramDownloader(
+        api_id=api_id_int,
+        api_hash=cfg["API_HASH"],
+        phone=cfg["PHONE"],
+        download_dir=cfg["DOWNLOAD_DIR"],
+        account_index=account_index,
+        log_func=console_log_func,
+        input_func=console_input_func
+    )
+
+    if not await downloader.connect_client():
+        return None
+    return downloader
 
 
-async def main():
+async def run_cli_login(args):
     env_path = Path(".env")
-    ensure_env_exists(env_path)
     envd = load_env(env_path)
 
-    while True:
-        choice = main_menu()
-        if choice == 9:
-            await run_downloader_with_env(envd)
-        elif choice == 1:
-            envd = do_login_flow(envd, console_input_func, console_log_func)
-            save_env(env_path, envd)
-            console_log_func(c(pad("Đã lưu cấu hình.", WIDTH, "left"), Fore.CYAN))
-            print_account_status(envd, console_log_func)  # in trạng thái ngay sau login
-        elif choice == 2:
-            envd = await do_logout_flow(envd, console_log_func)
-            save_env(env_path, envd)  # Save env after logout to update current_account=0
-        elif choice == 3:
-            envd = do_reset_flow(console_input_func, console_log_func)
-            save_env(env_path, envd)
-            console_log_func(c(pad("Đã reset .env.", WIDTH, "left"), Fore.CYAN))
-            envd = load_env(env_path)  # Reload to ensure consistency
-        elif choice == 5:
-            print_account_status(envd, console_log_func)
-        elif choice == 6:
-            # chạy nhanh "Continue last session"
-            idx = get_current_account_index(envd)
-            if idx == 0:
-                console_log_func(c(pad("Chưa chọn tài khoản.", WIDTH, "left"), Fore.YELLOW))
-                continue
-            cfg = get_account_config(envd, idx)
-            missing = [k for k, v in cfg.items() if not str(v).strip()]
-            if missing:
-                console_log_func(c(pad(f"Thiếu cấu hình: {', '.join(missing)}", WIDTH, "left"), Fore.RED))
-                continue
-            Path(cfg["DOWNLOAD_DIR"]).mkdir(parents=True, exist_ok=True)
-            app = TelegramDownloader(
-                api_id=int(cfg["API_ID"]),
-                api_hash=str(cfg["API_HASH"]),
-                phone=str(cfg["PHONE"]),
-                download_dir=str(cfg["DOWNLOAD_DIR"]),
-                account_index=idx,
-                log_func=console_log_func,
-                input_func=console_input_func,
-            )
-            # Bỏ qua menu nguồn, gọi trực tiếp đường tắt
-            try:
-                if not await app.connect_client():
-                    continue
-                prev = app.state.get_source()
-                if not prev or not prev.get("type"):
-                    console_log_func(pad("Chưa có phiên trước để tiếp tục.", WIDTH, "left"))
-                    await app.client.disconnect()
-                    continue
-                typ = prev.get("type")
-                if typ == "saved":
-                    await app._run_with_source("saved")
-                else:
-                    want_ids = [int(x) for x in prev.get("dialog_ids", []) if str(x).isdigit() and int(x) != 0]
-                    rows = await app.list_dialogs()
-                    ents = []
-                    for r in rows:
-                        try:
-                            if int(getattr(r["entity"], "id", 0)) in want_ids:
-                                ents.append(r["dialog"].entity)
-                        except Exception:
-                            pass
-                    if not ents:
-                        console_log_func(pad("Không khôi phục được danh sách dialogs từ phiên trước.", WIDTH, "left"))
-                    else:
-                        await app._run_with_source(typ, ents)
-            finally:
-                try:
-                    await app.client.disconnect()
-                except Exception:
-                    pass
-        elif choice == 4 or choice == 0:  # EXIT hoặc chọn sai -> thoát
-            console_log_func(c(pad("Goodbye.", WIDTH, "left"), Fore.CYAN))
-            break
+    # For CLI login, if parameters are provided, use them directly for a new login or update.
+    # Otherwise, it will be interactive.
+    _envd, _idx = await do_login_flow(envd, console_log_func, console_input_func,
+                                      phone=args.phone, api_id=args.api_id,
+                                      api_hash=args.api_hash, download_dir=args.download_dir,
+                                      account_idx_to_use=None)  # Pass None to allow interactive pick/new logic
+    save_env(env_path, _envd)
+    if _idx > 0:
+        console_log_func(pad(f"Login command finished. Active account set to #{_idx}.", WIDTH, "left"), "green")
+    else:
+        console_log_func(pad("Login command failed.", WIDTH, "left"), "red")
+
+
+async def run_cli_logout(args):
+    env_path = Path(".env")
+    envd = load_env(env_path)
+
+    _envd = await do_logout_flow(envd, console_log_func, args.account_index)
+    save_env(env_path, _envd)
+    console_log_func(pad("Logout command finished.", WIDTH, "left"), "green")
+
+
+async def run_cli_reset(args):
+    env_path = Path(".env")
+    envd = load_env(env_path)
+
+    confirm_reset = console_input_func("Are you sure you want to reset all config and delete session files? (yes/no)",
+                                       hide_input=False).lower() == 'yes'
+    _envd = await do_reset_flow(envd, console_log_func, confirm=confirm_reset)
+    save_env(env_path, _envd)
+    console_log_func(pad("Reset command finished.", WIDTH, "left"), "green")
+
+
+async def run_cli_upload(args):
+    env_path = Path(".env")
+    envd = load_env(env_path)
+    current_account_idx = get_current_account_index(envd)
+
+    if current_account_idx == 0:
+        console_log_func(pad("No active account found. Please login first using 'cli_app.py login'.", WIDTH, "left"),
+                         "red")
+        return
+
+    downloader = await initialize_downloader(envd, current_account_idx)
+    if not downloader:
+        return
+
+    try:
+        file_path = Path(args.file)
+        destination = args.to
+        caption = args.caption
+
+        console_log_func(pad(f"Starting upload of '{file_path.name}' to '{destination}'...", WIDTH, "left"), "blue")
+        await downloader.upload_media(
+            peer=destination,
+            file_path=file_path,
+            caption=caption,
+            progress_callback=cli_progress_callback
+        )
+        console_log_func(pad(f"Upload completed successfully for '{file_path.name}'.", WIDTH, "left"), "green")
+    except Exception as e:
+        console_log_func(pad(f"Error during upload: {e}", WIDTH, "left"), "red")
+    finally:
+        if downloader and downloader.client.is_connected():
+            await downloader.client.disconnect()
+
+
+async def run_cli_download(args):
+    env_path = Path(".env")
+    envd = load_env(env_path)
+    current_account_idx = get_current_account_index(envd)
+
+    if current_account_idx == 0:
+        console_log_func(pad("No active account found. Please login first using 'cli_app.py login'.", WIDTH, "left"),
+                         "red")
+        return
+
+    downloader = await initialize_downloader(envd, current_account_idx)
+    if not downloader:
+        return
+
+    try:
+        source_type = args.source
+        filter_type = args.filter
+        dialog_selection = args.dialogs
+
+        media_list = []
+        selected_entities: List[Any] = []
+
+        if source_type == "saved":
+            selected_entities = ['me']
+            await downloader._run_with_source("saved",
+                                              confirm_callback=lambda t, m: console_input_func(m + " (yes/no)", "no",
+                                                                                               False).lower() == 'yes',
+                                              progress_callback_scan=cli_scan_progress_callback,
+                                              progress_callback_download=cli_progress_callback)
+        elif source_type == "all":
+            dialogs_info = await downloader.list_dialogs()  # This prints dialogs to CLI
+            selected_entities = [d['entity'] for d in dialogs_info]
+            await downloader._run_with_source("all", selected_entities,
+                                              confirm_callback=lambda t, m: console_input_func(m + " (yes/no)", "no",
+                                                                                               False).lower() == 'yes',
+                                              progress_callback_scan=cli_scan_progress_callback,
+                                              progress_callback_download=cli_progress_callback)
+        elif source_type == "dialogs":
+            if not dialog_selection:
+                raise ValueError(
+                    "For 'dialogs' source, --dialogs argument is required (e.g., --dialogs 12345 @mychannel).")
+
+            console_log_func(pad("Fetching all dialogs to resolve selections...", WIDTH, "left"), "blue")
+            all_dialogs_from_api = await downloader.list_dialogs()  # This prints dialogs to CLI
+
+            for selector in dialog_selection:
+                found = False
+                try:  # Try by ID first
+                    target_id = int(selector)
+                    for d_info in all_dialogs_from_api:
+                        if hasattr(d_info["entity"], "id") and d_info["entity"].id == target_id:
+                            selected_entities.append(d_info["entity"])
+                            found = True
+                            break
+                except ValueError:  # Not an int, try by title/username
+                    for d_info in all_dialogs_from_api:
+                        title_lower = d_info['title'].lower()
+                        selector_lower = selector.lower()
+                        if title_lower == selector_lower:
+                            selected_entities.append(d_info["entity"])
+                            found = True
+                            break
+                        if hasattr(d_info["entity"], "username") and d_info["entity"].username and d_info[
+                            "entity"].username.lower() == selector_lower.lstrip('@'):
+                            selected_entities.append(d_info["entity"])
+                            found = True
+                            break
+                if not found:
+                    console_log_func(pad(f"Warning: Could not find dialog '{selector}'. Skipping.", WIDTH, "left"),
+                                     "yellow")
+
+            if not selected_entities:
+                raise ValueError("No valid dialogs selected for download.")
+
+            await downloader._run_with_source("dialogs", selected_entities,
+                                              confirm_callback=lambda t, m: console_input_func(m + " (yes/no)", "no",
+                                                                                               False).lower() == 'yes',
+                                              progress_callback_scan=cli_scan_progress_callback,
+                                              progress_callback_download=cli_progress_callback)
+        elif source_type == "continue":
+            console_log_func(pad("Attempting to continue last session...", WIDTH, "left"), "blue")
+            state_source = downloader.state.get_source()
+            if not state_source:
+                raise ValueError("No previous session found to continue.")
+
+            last_source_type = state_source.get("type")
+            last_dialog_ids = state_source.get("dialog_ids")
+
+            if last_source_type == "saved":
+                selected_entities = ['me']
+                await downloader._run_with_source("saved",
+                                                  confirm_callback=lambda t, m: console_input_func(m + " (yes/no)",
+                                                                                                   "no",
+                                                                                                   False).lower() == 'yes',
+                                                  progress_callback_scan=cli_scan_progress_callback,
+                                                  progress_callback_download=cli_progress_callback)
+            else:  # "dialogs" or "all"
+                console_log_func(pad("Fetching all dialogs to restore previous selection...", WIDTH, "left"), "blue")
+                all_dialogs_from_api = await downloader.list_dialogs()  # This prints dialogs to CLI
+                restored_entities = []
+                for d_info in all_dialogs_from_api:
+                    # state stores dialog_ids as int or 'me'
+                    if last_dialog_ids and hasattr(d_info["entity"], "id") and d_info["entity"].id in last_dialog_ids:
+                        restored_entities.append(d_info["entity"])
+                if not restored_entities:
+                    raise ValueError("Could not restore dialogs from previous session.")
+                selected_entities = restored_entities
+                await downloader._run_with_source(last_source_type, selected_entities,
+                                                  confirm_callback=lambda t, m: console_input_func(m + " (yes/no)",
+                                                                                                   "no",
+                                                                                                   False).lower() == 'yes',
+                                                  progress_callback_scan=cli_scan_progress_callback,
+                                                  progress_callback_download=cli_progress_callback)
+
+            # After _run_with_source completes, the downloader.state will have the chosen filter
+            # If a filter was specifically provided via CLI, it will override the last session's filter
+            # This is already handled in _run_with_source internally by default parameter logic.
+
+        else:
+            raise ValueError(f"Unknown source type: {source_type}. Choose from 'saved', 'dialogs', 'all', 'continue'.")
+
+
+    except Exception as e:
+        console_log_func(pad(f"Error during download: {e}", WIDTH, "left"), "red")
+    finally:
+        if downloader and downloader.client.is_connected():
+            await downloader.client.disconnect()
+
+
+async def cli_main_entry():
+    parser = argparse.ArgumentParser(
+        description="Telegram Media Downloader and Uploader CLI",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # --- Login/Auth Command ---
+    login_parser = subparsers.add_parser("login", help="Log in to a Telegram account or manage accounts.")
+    login_parser.add_argument("--phone", help="Phone number for login (e.g., +84123456789)")
+    login_parser.add_argument("--api-id", type=int, help="Telegram API ID")
+    login_parser.add_argument("--api-hash", help="Telegram API Hash")
+    login_parser.add_argument("--download-dir", default="downloads",
+                              help="Default download directory for this account.")
+
+    # --- Logout Command ---
+    logout_parser = subparsers.add_parser("logout", help="Logout the current active account or a specific one.")
+    logout_parser.add_argument("--account-index", type=int, default=None,
+                               help="Optional: Logout a specific account index instead of the current active one.")
+
+    # --- Reset Command ---
+    reset_parser = subparsers.add_parser("reset", help="Reset all configurations and delete session files.")
+
+    # --- Upload Command ---
+    upload_parser = subparsers.add_parser("upload", help="Upload a file to Telegram.")
+    upload_parser.add_argument("-f", "--file", required=True, help="Path to the file to upload.")
+    upload_parser.add_argument("-t", "--to", required=True, help="Destination (chat ID, @username, or phone number).")
+    upload_parser.add_argument("-c", "--caption", default="", help="Optional caption for the file.")
+
+    # --- Download Command ---
+    download_parser = subparsers.add_parser("download", help="Download media from Telegram.")
+    download_parser.add_argument("-s", "--source", choices=["saved", "dialogs", "all", "continue"], default="all",
+                                 help=(
+                                     "Source to download from:\n"
+                                     "  - saved: Your 'Saved Messages'\n"
+                                     "  - dialogs: Specific chats/channels (requires --dialogs)\n"
+                                     "  - all: All chats/channels you are part of\n"
+                                     "  - continue: Continue last download session"
+                                 ))
+    download_parser.add_argument("--dialogs", nargs='*', help="List of dialog IDs or @usernames to download from "
+                                                              "(required for --source dialogs, e.g., --dialogs 12345 @mychannel)")
+    download_parser.add_argument("-F", "--filter", choices=["1", "2", "3"], default="3",
+                                 help=(
+                                     "Media type filter:\n"
+                                     "  - 1: Photos only\n"
+                                     "  - 2: Videos only\n"
+                                     "  - 3: Both photos and videos (default)"
+                                 ))
+
+    # --- Status Command ---
+    status_parser = subparsers.add_parser("status", help="Show current account status and last session progress.")
+
+    args = parser.parse_args()
+
+    env_path = Path(".env")
+    ensure_env_exists(env_path)
+
+    # All commands will reload envd from file, execute, and save it.
+    # No need for the main_menu loop now, as CLI args handle everything.
+    if args.command == "login":
+        await run_cli_login(args)
+    elif args.command == "logout":
+        await run_cli_logout(args)
+    elif args.command == "reset":
+        await run_cli_reset(args)
+    elif args.command == "upload":
+        await run_cli_upload(args)
+    elif args.command == "download":
+        await run_cli_download(args)
+    elif args.command == "status":
+        envd = load_env(env_path)
+        print_account_status(envd, console_log_func)
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(cli_main_entry())
     except KeyboardInterrupt:
-        console_log_func("Goodbye.")
+        console_log_func(pad("CLI operation interrupted. Goodbye!", WIDTH, "left"), "red")
     except Exception as e:
-        console_log_func(f"Fatal: {e}")
+        console_log_func(pad(f"Fatal CLI error: {e}", WIDTH, "left"), "red")
         sys.exit(1)
+
+
+
 
