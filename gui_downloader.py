@@ -10,7 +10,7 @@ import sys
 import os
 import humanize
 
-# Import everything from downloader.py
+
 from downloader import (
     TelegramDownloader,
     StateManager,
