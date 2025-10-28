@@ -285,9 +285,12 @@ class TelegramDownloaderGUI:
 
                 ctk.CTkButton(
                     acc_frame,
-                    text="Select",
+                    text="Login",
+                    font=ctk.CTkFont(size=14, weight="bold"),
                     width=100,
-                    fg_color=self.colors['accent'],
+                    fg_color=self.colors['card'],
+                    border_width=1,
+                    border_color=self.colors['accent'],
                     hover_color=self.colors['accent_hover'],
                     command=lambda idx=acc['id']: self.select_account(idx)
                 ).pack(side="right", padx=10, pady=10)
@@ -364,7 +367,9 @@ class TelegramDownloaderGUI:
             text="Login & Continue",
             height=40,
             font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color=self.colors['accent'],
+            border_width=1,
+            border_color=self.colors['accent'],
+            fg_color=self.colors['card'],
             hover_color=self.colors['accent_hover'],
             command=self.handle_login
         ).pack(fill="x", pady=(10, 0))
@@ -376,6 +381,7 @@ class TelegramDownloaderGUI:
         ctk.CTkButton(
             btn_frame,
             text="Logout Current",
+            font=ctk.CTkFont(size=14, weight="bold"),
             fg_color=self.colors['warning'],
             hover_color="#e69500",
             command=self.handle_logout_current
@@ -384,6 +390,7 @@ class TelegramDownloaderGUI:
         ctk.CTkButton(
             btn_frame,
             text="Reset Config",
+            font=ctk.CTkFont(size=14, weight="bold"),
             fg_color=self.colors['error'],
             hover_color="#cc3a47",
             command=self.handle_reset
