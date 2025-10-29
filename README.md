@@ -14,8 +14,8 @@ A modular toolkit for downloading and uploading media via Telegram, featuring CL
 
 ## 📁 ui/
 ### 📁 cli/
-- `commands.py` — CLI command parsers and execution logic
-- `formatters.py` — Console output formatting and I/O wrappers
+- ~~`commands.py` — CLI command parsers and execution logic~~
+- ~~`formatters.py` — Console output formatting and I/O wrappers~~
 
 ### 📁 gui/
 - `app.py` — Main CustomTkinter application setup
