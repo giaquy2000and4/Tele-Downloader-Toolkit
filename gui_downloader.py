@@ -24,8 +24,7 @@ from downloader import (
     do_reset_flow,
     do_logout_flow,
     find_next_account_index,  # New import for account management
-    # console_log_func, # Not directly used for GUI logging, but good to know it's there
-    # console_input_func, # Not directly used for GUI input, but good to know it's there
+    
 )
 
 from telethon.tl.types import User, Chat, Channel  # Import for type hints
