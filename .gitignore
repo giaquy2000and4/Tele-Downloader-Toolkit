@@ -3,4 +3,5 @@ session.session
 *.ini
 *.cfg
 sessions/
+refactoring-foundation.txt
 
