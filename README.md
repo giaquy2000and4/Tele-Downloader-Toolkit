@@ -9,8 +9,8 @@ A modular toolkit for downloading and uploading media via Telegram, featuring CL
 - ~~`state_manager.py` — State persistence for download sessions~~
 
 ## 📁 storage/
-- `config.py` — `.env` management and account configuration
-- `credentials.py` — *(Future)* Encrypted credential storage
+- ~~`config.py` — `.env` management and account configuration~~
+- ~~`credentials.py` — *(Future)* Encrypted credential storage~~
 
 ## 📁 ui/
 ### 📁 cli/
