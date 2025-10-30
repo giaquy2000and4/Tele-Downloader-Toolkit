@@ -158,7 +158,7 @@ def cli_progress_callback(
         is_download: bool = False,
         is_single_file_upload: bool = False,
         is_folder_upload: bool = False,
-        current_file_bytes: Optional[int] = None,  # Used for folder upload, current bytes of THIS file
+        current_file_bytes: Optional[int] = None,  
         total_file_bytes: Optional[int] = None  # Used for folder upload, total bytes of THIS file
 ):
     bar_length = 50
