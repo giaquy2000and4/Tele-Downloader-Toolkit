@@ -22,7 +22,7 @@ try:
         PhoneCodeExpiredError,
         PasswordHashInvalidError,
         FloodWaitError,
-        PeerFloodError  # Added PeerFloodError
+        PeerFloodError  
     )
     from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, User, Chat, Channel
 except ImportError as e:
