@@ -9,14 +9,14 @@ from typing import List, Dict, Any, Optional, Tuple, Union
 
 import humanize
 
-# Import core components using relative paths
-from ...core.client import TelegramClientWrapper
-from ...core.downloader import MediaDownloader
-from ...core.uploader import MediaUploader
-from ...core.state_manager import StateManager
+# Import core components (Corrected relative imports)
+from ..core.client import TelegramClientWrapper
+from ..core.downloader import MediaDownloader
+from ..core.uploader import MediaUploader
+from ..core.state_manager import StateManager
 
-# Import storage components using relative path
-from ...storage import config
+# Import storage components (Corrected relative imports)
+from ..storage import config
 
 # Import CLI formatting and I/O wrappers from the same directory
 from .formatters import (
@@ -29,7 +29,6 @@ from .formatters import (
     pad,
     box,
     # Fore is not used directly here; c() with string color tags is preferred.
-    # If your linter still complains, you can remove 'Fore' from this import.
 )
 
 
@@ -214,24 +213,21 @@ async def run_cli_logout(args):
                 log_func=console_log_func, input_func=console_input_func
             )
             session_file_path = Path("sessions") / f"session_{idx_to_logout}.session"
-            if session_file_path.exists():  # Only try to connect if a session file is present
+            if session_file_path.exists():
                 try:
                     await temp_client_wrapper.client.connect()
                     await temp_client_wrapper.disconnect_client()
                 except Exception:
-                    # Ignore connection/disconnect errors if session is already invalid or client isn't fully authorized
                     pass
     except Exception:
-        pass  # Ignore any errors during temp client init/disconnect
+        pass
 
-    # Clear relevant env vars
     envd = config.delete_account_config(envd, idx_to_logout)
     config.save_env(env_path, envd)
 
-    # Purge session and state files for this account
     try:
         session_file = Path("sessions") / f"session_{idx_to_logout}.session"
-        state_manager = StateManager(idx_to_logout)  # Initialize to get the state file path
+        state_manager = StateManager(idx_to_logout)
 
         if session_file.exists():
             session_file.unlink()
@@ -261,11 +257,9 @@ async def run_cli_reset(args):
 
     console_log_func(pad("Resetting all configurations and deleting all session files...", WIDTH, "left"), "red")
 
-    # Clear all account-specific entries and reset CURRENT_ACCOUNT
     new_envd = {"CURRENT_ACCOUNT": "0"}
-    config.save_env(env_path, new_envd)  # Overwrite .env with just current_account=0
+    config.save_env(env_path, new_envd)
 
-    # Purge all session files
     try:
         session_dir = Path("sessions")
         if session_dir.exists():
@@ -274,9 +268,7 @@ async def run_cli_reset(args):
                     f.unlink()
             console_log_func(pad(f"Deleted all files in {session_dir}", WIDTH, "left"), "blue")
 
-        # Also check for state files in base directory (e.g., session_1_state.json)
-        # Iterate through potential indices from previous envd to ensure all state files are removed
-        for idx in config.get_all_account_indices(envd) + [0]:  # Add 0 in case state for default account exists
+        for idx in config.get_all_account_indices(envd) + [0]:
             state_manager = StateManager(idx)
             if state_manager.state_file.exists():
                 state_manager.delete_state_file()
@@ -300,7 +292,7 @@ async def run_cli_upload(args):
     components = await _initialize_downloader_and_uploader_for_command(env_path, current_account_idx)
     if not components:
         return
-    client_wrapper, _, uploader = components  # We only need uploader and client_wrapper for disconnect
+    client_wrapper, _, uploader = components
 
     try:
         file_or_folder_path = Path(args.path)
@@ -354,7 +346,7 @@ async def run_cli_download(args):
     components = await _initialize_downloader_and_uploader_for_command(env_path, current_account_idx)
     if not components:
         return
-    client_wrapper, downloader, _ = components  # We only need downloader and client_wrapper for disconnect
+    client_wrapper, downloader, _ = components
 
     try:
         source_type = args.source
@@ -362,7 +354,7 @@ async def run_cli_download(args):
 
         chosen_entities = []
         if source_type == "dialogs" or source_type == "all":
-            all_dialogs_info = await downloader.list_dialogs()  # Get all dialogs first
+            all_dialogs_info = await downloader.list_dialogs()
             if source_type == "all":
                 chosen_entities = [d['entity'] for d in all_dialogs_info]
             elif source_type == "dialogs":
@@ -370,10 +362,8 @@ async def run_cli_download(args):
                     console_log_func(pad("--dialogs argument is required for --source dialogs.", WIDTH, "left"), "red")
                     return
 
-                # Filter dialogs based on provided IDs/usernames
                 for identifier in args.dialogs:
                     found = False
-                    # Try to parse as int ID
                     try:
                         dialog_id = int(identifier)
                         for d_info in all_dialogs_info:
@@ -382,9 +372,8 @@ async def run_cli_download(args):
                                 found = True
                                 break
                     except ValueError:
-                        # If not an int, treat as username
-                        if identifier.startswith('@'):  # Ensure it's a username format
-                            identifier = identifier[1:]  # Remove '@'
+                        if identifier.startswith('@'):
+                            identifier = identifier[1:]
                         for d_info in all_dialogs_info:
                             if d_info['username'] and d_info['username'].lower() == f"@{identifier}".lower():
                                 chosen_entities.append(d_info['entity'])
@@ -398,24 +387,21 @@ async def run_cli_download(args):
                     console_log_func(pad("No valid dialogs selected for download.", WIDTH, "left"), "red")
                     return
         elif source_type == "saved":
-            # For 'saved', no specific entities are passed, 'me' is handled internally by scan_saved_messages
             chosen_entities = []
         elif source_type == "continue":
-            # State manager will handle restoring the entities
             state_data = downloader.state.get_source()
             if not state_data or not state_data.get("type"):
                 console_log_func(pad("No previous session found to continue.", WIDTH, "left"), "yellow")
                 return False
 
-            # Override source_type and filter_type from state for continue
-            source_type = state_data.get("type", "all")  # Default to all if not in state
+            source_type = state_data.get("type", "all")
             media_filter = downloader.state.get_last_filter()
 
             if source_type == "saved":
-                chosen_entities = []  # Signifies 'me'
-            else:  # Must be "all" or "dialogs"
+                chosen_entities = []
+            else:
                 dialog_ids_from_state = state_data.get("dialog_ids", [])
-                all_dialogs_info = await downloader.list_dialogs()  # Refresh dialogs
+                all_dialogs_info = await downloader.list_dialogs()
                 restored_entities = []
                 want_ids = [int(x) for x in dialog_ids_from_state if
                             isinstance(x, (int, str)) and str(x).isdigit() and int(x) != 0]
@@ -428,7 +414,6 @@ async def run_cli_download(args):
                     return False
                 chosen_entities = restored_entities
 
-        # Use a simple lambda for confirm_reset_callback for CLI
         cli_confirm_reset = lambda title, message: console_input_func(f"{title}: {message} (yes/no)", "no",
                                                                       False).lower() == 'yes'
 
@@ -460,9 +445,7 @@ async def run_cli_status(args):
 
     cfg = config.get_account_config(envd, current_account_idx)
 
-    # Initialize a StateManager to read the state file, no need for full client init/connect
     try:
-        # Check if core config for this account is even present
         if not all([cfg["PHONE"], cfg["API_ID"], cfg["API_HASH"]]):
             console_log_func(
                 pad(f"Account #{current_account_idx} configuration is incomplete in .env file.", WIDTH, "left"),
@@ -478,14 +461,12 @@ async def run_cli_status(args):
 
         lines = [c(pad("ACCOUNT STATUS", WIDTH - 2), "cyan"), pad("", WIDTH - 2)]
         lines.extend(
-            [pad(s, WIDTH - 2) for s in state_manager.get_status_lines(Path(cfg['DOWNLOAD_DIR']))])  # Pass download_dir
+            [pad(s, WIDTH - 2) for s in state_manager.get_status_lines(Path(cfg['DOWNLOAD_DIR']))])
         console_log_func(c(box(lines), "cyan"))
 
     except Exception as e:
         console_log_func(pad(f"Error retrieving status for account #{current_account_idx}: {e}", WIDTH, "left"), "red")
 
-
-# --- Main CLI Entry Point ---
 
 async def cli_main_entry():
     parser = argparse.ArgumentParser(
@@ -495,7 +476,6 @@ async def cli_main_entry():
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands", required=True)
 
-    # --- Login/Auth Command ---
     login_parser = subparsers.add_parser("login", help="Log in to a Telegram account or manage accounts.")
     login_parser.add_argument("--phone", help="Phone number for login (e.g., +84123456789)")
     login_parser.add_argument("--api-id", type=int, help="Telegram API ID")
@@ -504,17 +484,14 @@ async def cli_main_entry():
                               help="Default download directory for this account.")
     login_parser.set_defaults(func=run_cli_login)
 
-    # --- Logout Command ---
     logout_parser = subparsers.add_parser("logout", help="Logout the current active account or a specific one.")
     logout_parser.add_argument("--account-index", type=int, default=None,
                                help="Optional: Logout a specific account index instead of the current active one.")
     logout_parser.set_defaults(func=run_cli_logout)
 
-    # --- Reset Command ---
     reset_parser = subparsers.add_parser("reset", help="Reset all configurations and delete session files.")
     reset_parser.set_defaults(func=run_cli_reset)
 
-    # --- Upload Command ---
     upload_parser = subparsers.add_parser("upload", help="Upload a file or all media from a folder to Telegram.")
     upload_parser.add_argument("-p", "--path", required=True,
                                help="Path to the file or folder to upload.")
@@ -522,7 +499,6 @@ async def cli_main_entry():
     upload_parser.add_argument("-c", "--caption", default="", help="Optional caption for the file(s).")
     upload_parser.set_defaults(func=run_cli_upload)
 
-    # --- Download Command ---
     download_parser = subparsers.add_parser("download", help="Download media from Telegram.")
     download_parser.add_argument("-s", "--source", choices=["saved", "dialogs", "all", "continue"], default="all",
                                  help=(
@@ -545,17 +521,14 @@ async def cli_main_entry():
                                  ))
     download_parser.set_defaults(func=run_cli_download)
 
-    # --- Status Command ---
     status_parser = subparsers.add_parser("status", help="Show current account status and last session progress.")
     status_parser.set_defaults(func=run_cli_status)
 
     args = parser.parse_args()
 
-    # Ensure .env file exists before any command runs
     env_path = Path(".env")
     config.ensure_env_exists(env_path)
 
-    # Execute the function associated with the chosen subcommand
     if hasattr(args, 'func'):
         asyncio.run(args.func(args))
     else:

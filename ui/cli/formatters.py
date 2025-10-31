@@ -1,5 +1,3 @@
-# tele-downloader-toolkit/ui/cli/formatters.py
-
 import sys
 import os
 import re  # Import re for regex operations
@@ -38,7 +36,6 @@ if colorama:
 
 def _strip_ansi_codes(s: str) -> str:
     """Removes ANSI escape codes from a string to get its visible length."""
-    # This regex matches common ANSI escape sequences for colors and cursor movements.
     return re.sub(r'\x1b\[([0-9]{1,2}(;[0-9]{1,2})?)?[m|K]', '', s)
 
 
@@ -52,7 +49,7 @@ def c(text: str, color: Optional[str]) -> str:
         "yellow": Fore.YELLOW,
         "blue": Fore.BLUE,
         "cyan": Fore.CYAN,
-        "reset": Style.RESET_ALL  # For completeness, not directly used in f-string
+        "reset": Style.RESET_ALL
     }
     prefix = color_map.get(color.lower(), "")
     if prefix:
@@ -63,23 +60,14 @@ def c(text: str, color: Optional[str]) -> str:
 def pad(text: str, width: int = WIDTH, align: str = "left") -> str:
     """Pads text to a given width with optional alignment, accounting for ANSI codes."""
     text = text if text is not None else ""
-    # strip ANSI escape codes before calculating length for padding
     clean_text = _strip_ansi_codes(text)
 
-    # Calculate how many extra characters ANSI codes add to the string's length
     ansi_code_length = len(text) - len(clean_text)
 
-    # If the clean text is already too long, truncate it visually
     if len(clean_text) > width:
-        # Truncate the clean text part, then add "..."
         truncated_clean = clean_text[: width - 3] + "..."
-        # Reconstruct the string: this is a simplification. Ideally, you'd apply
-        # the original colors to the truncated part, but that's complex.
-        # For CLI output, simply truncating the plain text is usually acceptable.
-        return truncated_clean.ljust(width)  # Pad based on visual width
+        return truncated_clean.ljust(width)
 
-    # Pad the original string (with ANSI codes) but using the clean text's length
-    # to ensure correct visual alignment.
     if align == "left":
         return text.ljust(width + ansi_code_length)
     elif align == "right":
@@ -105,19 +93,15 @@ def box(lines: List[str], width: int = WIDTH) -> str:
         ansi_code_length = len(s) - len(clean_s)
 
         if len(clean_s) > inner_width:
-            # Truncate visually, then pad
             display_s = clean_s[:inner_width - 3] + "..."
             display_s_padded = display_s.ljust(inner_width)
         else:
-            # Pad the original string (with ANSI codes) to the required visual width
             display_s_padded = s.ljust(inner_width + ansi_code_length)
 
         formatted_inner_lines.append("│" + display_s_padded + "│")
 
-    # Fix: Extract newline character outside of f-string expression
-    newline = '\n'
-    inner_content = newline.join(formatted_inner_lines)
-    return f"{top}{newline}{inner_content}{newline}{bottom}"
+    box_lines = [top] + formatted_inner_lines + [bottom]
+    return '\n'.join(box_lines)
 
 
 # ============================ CLI-specific I/O Functions =============================
@@ -153,13 +137,13 @@ def console_input_func(prompt: str, default: Optional[str] = None, hide_input: b
 # CLI progress callback for download and upload
 def cli_progress_callback(
         progress: float,
-        current_processed_items_or_bytes: int,  # current (files processed or bytes uploaded)
-        total_items_or_bytes: int,  # total (files to process or bytes to upload)
+        current_processed_items_or_bytes: int,
+        total_items_or_bytes: int,
         is_download: bool = False,
         is_single_file_upload: bool = False,
         is_folder_upload: bool = False,
-        current_file_bytes: Optional[int] = None,  
-        total_file_bytes: Optional[int] = None  # Used for folder upload, total bytes of THIS file
+        current_file_bytes: Optional[int] = None,
+        total_file_bytes: Optional[int] = None
 ):
     bar_length = 50
     filled_length = int(bar_length * progress)
@@ -180,7 +164,8 @@ def cli_progress_callback(
     else:
         message_content = f'Progress: |{bar}| {percent}% ({current_processed_items_or_bytes}/{total_items_or_bytes})'
 
-    sys.stdout.write("\r{}".format(message_content))
+    # Use separate string literals for escape sequences (Python 3.10 compatibility)
+    sys.stdout.write('\r' + message_content)
     sys.stdout.flush()
     if progress >= 1.0:
         sys.stdout.write('\n')
@@ -192,7 +177,8 @@ def cli_scan_progress_callback(current_messages_scanned: int, total_messages: Op
     total_messages is often not known upfront during iteration.
     """
     message_content = f'Scanning... Processed {current_messages_scanned} messages. '
-    sys.stdout.write("\r{}".format(message_content))
+    # Use separate string literals for escape sequences (Python 3.10 compatibility)
+    sys.stdout.write('\r' + message_content)
     sys.stdout.flush()
     if total_messages is not None and current_messages_scanned >= total_messages:
         sys.stdout.write('\n')
