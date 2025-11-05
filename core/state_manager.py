@@ -6,6 +6,7 @@ from datetime import datetime
 import hashlib
 from typing import List, Dict, Any, Optional, Union
 
+
 class StateManager:
     """
     Manages the persistent state for a specific account's download sessions.
@@ -14,15 +15,14 @@ class StateManager:
 
     def __init__(self, account_index: int):
         self.account_index = int(account_index)
-        # State file is now in base directory, named with account index
         self.state_file = Path(f"session_{self.account_index}_state.json")
         self.state: Dict[str, Any] = {
             "account_index": self.account_index,
-            "source": {},  # {"type": "saved|dialogs|all", "dialog_ids": []}
-            "completed_ids": [],  # list[int] of message.id that have been downloaded
+            "source": {},
+            "completed_ids": [],
             "total_found": 0,
-            "ids_hash": "",  # sha256 of the list of message.id found in the last scan
-            "last_filter": "3",  # 1=photos, 2=videos, 3=both
+            "ids_hash": "",
+            "last_filter": "3",
             "last_updated": None,
         }
         self._load()
@@ -32,28 +32,23 @@ class StateManager:
         try:
             if self.state_file.exists():
                 data = json.loads(self.state_file.read_text(encoding="utf-8"))
-                # Only load if the account_index matches
                 if int(data.get("account_index", -1)) == self.account_index:
                     self.state.update(data)
         except Exception:
-            # If loading fails (e.g., corrupted JSON), gracefully start with default state
             pass
 
     def save(self):
         """Saves the current state to the JSON file."""
         self.state["last_updated"] = datetime.utcnow().isoformat() + "Z"
         try:
-            # Ensure the directory for the state file exists (current directory for simplicity)
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             self.state_file.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
-            # Handle potential file write errors
             pass
 
-    # --- Public API for managing state ---
     def set_source(self,
                    source_type: str,
-                   dialog_ids: Union[List[int], List[str]], # Can be list of int IDs or ["me"] for saved
+                   dialog_ids: Union[List[int], List[str]],
                    total_found: int = 0,
                    ids_hash: str = "",
                    last_filter: Optional[str] = None):
@@ -107,7 +102,7 @@ class StateManager:
             f"Account: #{self.account_index}",
             f"Source: {self.source_label()}",
             f"Progress: {self.completed_count()}/{self.total_found()}",
-            f"Download directory: {download_dir}", # download_dir passed as param
+            f"Download directory: {download_dir}",
             f"Media list hash: {self.state.get('ids_hash') or '-'}",
             f"Last filter: {self.state.get('last_filter', '3')}",
             f"Last updated: {self.state.get('last_updated') or '-'}",
@@ -132,3 +127,6 @@ class StateManager:
         """Deletes the state file from disk."""
         if self.state_file.exists():
             self.state_file.unlink()
+
+
+

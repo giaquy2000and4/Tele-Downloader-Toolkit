@@ -11,14 +11,19 @@ import os
 import humanize
 import time
 
-# Import core components (Corrected relative imports - changed to '...')
-from ...core.client import TelegramClientWrapper
-from ...core.downloader import MediaDownloader
-from ...core.uploader import MediaUploader
-from ...core.state_manager import StateManager
+# Working Directory Setup
+project_root = Path(__file__).parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-# Import storage components (Corrected relative imports - changed to '...')
-from ...storage import config
+# Import core components (Corrected imports)
+from core.client import TelegramClientWrapper
+from core.downloader import MediaDownloader
+from core.uploader import MediaUploader
+from core.state_manager import StateManager
+
+# Import storage components (Corrected imports)
+from storage import config
 
 # Import Telethon types for peer resolution
 try:
@@ -36,7 +41,6 @@ except ImportError as e:
     print("Install: pip install telethon")
     sys.exit(1)
 
-# Type aliases for internal GUI functions passed to core modules
 LogFuncType = Callable[[str, Optional[str]], None]
 InputFuncType = Callable[[str, Optional[str], bool], str]
 ConfirmFuncType = Callable[[str, str], bool]
@@ -71,7 +75,6 @@ class TelegramDownloaderGUI:
         self.env_path = Path(".env")
         config.ensure_env_exists(self.env_path)
 
-        # Variables
         self.current_screen = "login"
         self.envd = config.load_env(self.env_path)
         self.current_account_idx = config.get_current_account_index(self.envd)
@@ -84,14 +87,12 @@ class TelegramDownloaderGUI:
         self.upload_thread: Optional[threading.Thread] = None
         self.is_downloading = False
         self.is_uploading = False
-        self.stop_flag = threading.Event()  # Use a threading.Event for stopping
+        self.stop_flag = threading.Event()
 
         self.active_loop: Optional[asyncio.AbstractEventLoop] = None
 
-        self._gui_event = threading.Event()
-        self._gui_input_result: Any = None
+        self._gui_input_result: Any = None  # Keep this for gui_get_input
 
-        # Stats tracking (for download - should be managed by MediaDownloader eventually)
         self.stats = {
             'total_found': 0,
             'images_found': 0,
@@ -102,42 +103,35 @@ class TelegramDownloaderGUI:
             'total_size': 0,
         }
 
-        self.scanned_media_list: List[Dict[str, Any]] = []  # All media found in a scan
-        self.filtered_media_list: List[Dict[str, Any]] = []  # Media after applying filter
+        self.scanned_media_list: List[Dict[str, Any]] = []
+        self.filtered_media_list: List[Dict[str, Any]] = []
         self.current_source_type: Optional[str] = None
-        self.current_filter = "3"  # Default filter
+        self.current_filter = "3"
         self.selected_download_dialog_entities: List[Union[User, Chat, Channel]] = []
-        self.all_dialogs_info: List[Dict[str, Any]] = []  # All dialogs fetched for selector
+        self.all_dialogs_info: List[Dict[str, Any]] = []
 
-        # Upload specific variables
         self.upload_source_path: Optional[Path] = None
         self.upload_is_folder_mode: bool = False
         self.upload_destination_entity: Optional[Union[User, Chat, Channel, int, str]] = None
         self.selected_upload_dialog_title: str = "Select a destination"
 
-        # References to buttons/widgets for dynamic updates
         self.continue_selected_btn: Optional[ctk.CTkButton] = None
         self.start_download_btn: Optional[ctk.CTkButton] = None
         self.upload_start_btn: Optional[ctk.CTkButton] = None
 
-        # Configure root
         self.root.configure(fg_color=self.colors['bg'])
 
-        # Main container
         self.main_container = ctk.CTkFrame(self.root, fg_color=self.colors['bg'])
         self.main_container.pack(fill="both", expand=True, padx=20, pady=20)
 
-        # Show initial screen
         self.show_login_screen()
 
-        # Protocol for window closing
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def clear_screen(self):
         """Removes all widgets from the main container."""
         for widget in self.main_container.winfo_children():
             widget.destroy()
-        # Reset references when screen is cleared
         self.continue_selected_btn = None
         self.start_download_btn = None
         self.upload_start_btn = None
@@ -167,74 +161,63 @@ class TelegramDownloaderGUI:
         """Custom log function to append messages to the GUI's log textbox or update progress labels."""
         self.root.after(0, lambda: self._append_log(message, color_tag))
 
+    # Corrected gui_get_input to be non-blocking with root.wait_window
     def gui_get_input(self, prompt: str, default: Optional[str] = None, hide_input: bool = False) -> str:
         """Custom input function to get user input via a CTkToplevel dialog."""
-        self._gui_input_result = None
-        self._gui_event.clear()
+        self._gui_input_result = None  # Reset result
 
-        def show_input_dialog():
-            dialog = ctk.CTkToplevel(self.root)
-            dialog.title("Input Required")
-            dialog.geometry("400x200")
-            dialog.transient(self.root)
-            dialog.grab_set()  # Make it modal
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("Input Required")
+        dialog.geometry("400x200")
+        dialog.transient(self.root)
+        dialog.grab_set()  # Make it modal
 
-            ctk.CTkLabel(dialog, text=prompt, text_color=self.colors['text']).pack(pady=(10, 5))
+        ctk.CTkLabel(dialog, text=prompt, text_color=self.colors['text']).pack(pady=(10, 5))
 
-            entry = ctk.CTkEntry(dialog, placeholder_text=default or "", fg_color=self.colors['card'],
-                                 border_color=self.colors['accent'])
-            if hide_input:
-                entry.configure(show="*")
-            entry.pack(pady=5, padx=20, fill="x")
-            if default:
-                entry.insert(0, default)
+        entry = ctk.CTkEntry(dialog, placeholder_text=default or "", fg_color=self.colors['card'],
+                             border_color=self.colors['accent'])
+        if hide_input:
+            entry.configure(show="*")
+        entry.pack(pady=5, padx=20, fill="x")
+        if default:
+            entry.insert(0, default)
 
-            def submit():
-                self._gui_input_result = entry.get().strip() or default or ""
-                dialog.destroy()
-                self._gui_event.set()
+        def submit():
+            self._gui_input_result = entry.get().strip() or default or ""
+            dialog.destroy()
 
-            def cancel():
-                self._gui_input_result = ""  # Return empty string on cancel
-                dialog.destroy()
-                self._gui_event.set()
+        def cancel():
+            self._gui_input_result = ""  # Return empty string on cancel
+            dialog.destroy()
 
-            ctk.CTkButton(dialog, text="Submit", command=submit, fg_color=self.colors['accent'],
-                          hover_color=self.colors['accent_hover']).pack(pady=(10, 5), padx=20, fill="x")
-            ctk.CTkButton(dialog, text="Cancel", command=cancel, fg_color="gray", hover_color="darkgray").pack(
-                pady=(5, 10), padx=20, fill="x")
+        ctk.CTkButton(dialog, text="Submit", command=submit, fg_color=self.colors['accent'],
+                      hover_color=self.colors['accent_hover']).pack(pady=(10, 5), padx=20, fill="x")
+        ctk.CTkButton(dialog, text="Cancel", command=cancel, fg_color="gray", hover_color="darkgray").pack(
+            pady=(5, 10), padx=20, fill="x")
 
-            dialog.protocol("WM_DELETE_WINDOW", cancel)  # Handle closing via X button
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
 
-        self.root.after(0, show_input_dialog)
-        self._gui_event.wait()  # Block until dialog is closed
+        # Wait for the dialog to be destroyed. This function will block the current thread
+        # (which is the background thread calling gui_get_input), but not the Tkinter mainloop.
+        self.root.wait_window(dialog)
 
         return self._gui_input_result
 
+    # Corrected gui_confirm_callback to directly use messagebox
     def gui_confirm_callback(self, title: str, message: str) -> bool:
-        """Helper to display a confirmation dialog and block the calling thread."""
-        self._gui_input_result = None
-        self._gui_event.clear()
-
-        def show_confirm_dialog():
-            result = messagebox.askyesno(title, message)
-            self._gui_input_result = result
-            self._gui_event.set()
-
-        self.root.after(0, show_confirm_dialog)
-        self._gui_event.wait()
-        return self._gui_input_result
+        """Helper to display a confirmation dialog."""
+        # messagebox.askyesno is already thread-safe for Tkinter.
+        # It internally uses root.tk.call, which Tkinter ensures runs on the main thread.
+        return messagebox.askyesno(title, message)
 
     # ==================== LOGIN SCREEN ====================
     def show_login_screen(self):
         self.clear_screen()
         self.current_screen = "login"
 
-        # Reload env
         self.envd = config.load_env(self.env_path)
         self.current_account_idx = config.get_current_account_index(self.envd)
 
-        # Header
         header = ctk.CTkFrame(self.main_container, fg_color="transparent")
         header.pack(fill="x", pady=(0, 20))
 
@@ -254,7 +237,6 @@ class TelegramDownloaderGUI:
         )
         subtitle.pack()
 
-        # New content frame for the two-column layout
         content_grid_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         content_grid_frame.pack(fill="both", expand=True, padx=0, pady=0)
 
@@ -262,7 +244,6 @@ class TelegramDownloaderGUI:
         content_grid_frame.grid_columnconfigure(1, weight=1)
         content_grid_frame.grid_rowconfigure(0, weight=1)
 
-        # --- Left Column: Existing Accounts (with scroll) ---
         accounts_scroll_frame = ctk.CTkScrollableFrame(
             content_grid_frame,
             fg_color="transparent"
@@ -318,14 +299,12 @@ class TelegramDownloaderGUI:
         else:
             ctk.CTkLabel(accounts_card, text="No existing accounts.", text_color=self.colors['text_dim']).pack(pady=20)
 
-        # --- Right Column: Add New Account ---
         add_card = self._create_card(content_grid_frame, "Add New Account")
         add_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0), pady=0)
 
         form_frame = ctk.CTkFrame(add_card, fg_color="transparent")
         form_frame.pack(fill="both", padx=15, pady=(0, 15))
 
-        # Phone
         ctk.CTkLabel(form_frame, text="Phone Number:", text_color=self.colors['text']).pack(anchor="w", pady=(5, 0))
         self.phone_entry = ctk.CTkEntry(
             form_frame,
@@ -335,7 +314,6 @@ class TelegramDownloaderGUI:
         )
         self.phone_entry.pack(fill="x", pady=(0, 10))
 
-        # API ID
         ctk.CTkLabel(form_frame, text="API ID:", text_color=self.colors['text']).pack(anchor="w", pady=(5, 0))
         self.api_id_entry = ctk.CTkEntry(
             form_frame,
@@ -345,7 +323,6 @@ class TelegramDownloaderGUI:
         )
         self.api_id_entry.pack(fill="x", pady=(0, 10))
 
-        # API Hash
         ctk.CTkLabel(form_frame, text="API Hash:", text_color=self.colors['text']).pack(anchor="w", pady=(5, 0))
         self.api_hash_entry = ctk.CTkEntry(
             form_frame,
@@ -355,7 +332,6 @@ class TelegramDownloaderGUI:
         )
         self.api_hash_entry.pack(fill="x", pady=(0, 10))
 
-        # Download Directory
         dir_frame = ctk.CTkFrame(form_frame, fg_color="transparent")
         dir_frame.pack(fill="x", pady=(5, 10))
 
@@ -382,7 +358,6 @@ class TelegramDownloaderGUI:
             command=self.browse_directory
         ).pack(side="right")
 
-        # Login button
         ctk.CTkButton(
             form_frame,
             text="Login & Continue",
@@ -395,7 +370,6 @@ class TelegramDownloaderGUI:
             command=self.handle_login
         ).pack(fill="x", pady=(10, 0))
 
-        # Bottom buttons (kept at the bottom of main_container)
         btn_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         btn_frame.pack(fill="x", pady=(10, 0))
 
@@ -422,13 +396,11 @@ class TelegramDownloaderGUI:
         self.clear_screen()
         self.current_screen = "source"
 
-        # Reset upload specific state
         self.upload_source_path = None
         self.upload_is_folder_mode = False
         self.upload_destination_entity = None
         self.selected_upload_dialog_title = "Select a destination"
 
-        # Header
         header_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         header_frame.pack(fill="x", pady=(0, 20))
 
@@ -461,14 +433,12 @@ class TelegramDownloaderGUI:
             command=self.handle_logout_and_return
         ).pack(side="right", padx=(5, 0))
 
-        # Main content frame for two panels
         content_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         content_frame.pack(fill="both", expand=True)
         content_frame.grid_columnconfigure(0, weight=1)
         content_frame.grid_columnconfigure(1, weight=3)
         content_frame.grid_rowconfigure(0, weight=1)
 
-        # Left Panel - Source Selection Buttons
         self.left_panel = ctk.CTkFrame(content_frame, fg_color=self.colors['card'], corner_radius=10)
         self.left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10), pady=0)
         self.left_panel.grid_rowconfigure(6, weight=1)
@@ -497,7 +467,6 @@ class TelegramDownloaderGUI:
             btn.pack(fill="x", padx=15, pady=5)
             self.source_buttons[src_type] = btn
 
-        # Right Panel - Dynamic Content
         self.right_panel = ctk.CTkScrollableFrame(content_frame, fg_color=self.colors['card'], corner_radius=10)
         self.right_panel.grid(row=0, column=1, sticky="nsew", padx=(10, 0), pady=0)
         self.right_panel.grid_columnconfigure(0, weight=1)
@@ -631,7 +600,6 @@ class TelegramDownloaderGUI:
         ctk.CTkLabel(self.right_panel, text="Select files/folder and a destination chat/channel to upload.",
                      text_color=self.colors['text_dim'], wraplength=400).pack(pady=(0, 20))
 
-        # File/Folder selection
         file_selection_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
         file_selection_frame.pack(fill="x", padx=20, pady=(10, 5))
         ctk.CTkLabel(file_selection_frame, text="Source File(s) / Folder:", text_color=self.colors['text']).pack(
@@ -657,7 +625,6 @@ class TelegramDownloaderGUI:
                       fg_color=self.colors['card'], border_width=1, border_color=self.colors['upload_color']).pack(
             side="left")
 
-        # Destination Dialog selection
         dest_selection_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
         dest_selection_frame.pack(fill="x", padx=20, pady=5)
         ctk.CTkLabel(dest_selection_frame, text="Destination Chat/Channel:", text_color=self.colors['text']).pack(
@@ -676,7 +643,6 @@ class TelegramDownloaderGUI:
         ctk.CTkButton(dest_input_frame, text="Select Dialog", command=self._open_upload_destination_dialog_selector,
                       fg_color=self.colors['upload_color'], hover_color=self.colors['upload_hover']).pack(side="right")
 
-        # Caption
         caption_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
         caption_frame.pack(fill="x", padx=20, pady=5)
         ctk.CTkLabel(caption_frame, text="Caption (Optional):", text_color=self.colors['text']).pack(anchor="w")
@@ -684,7 +650,6 @@ class TelegramDownloaderGUI:
                                                  border_color=self.colors['upload_color'])
         self.upload_caption_entry.pack(fill="x")
 
-        # Upload Button
         self.upload_start_btn = ctk.CTkButton(
             self.right_panel,
             text="Start Upload",
@@ -695,7 +660,6 @@ class TelegramDownloaderGUI:
         )
         self.upload_start_btn.pack(pady=20)
 
-        # Progress bar and label
         self.upload_progress_bar = ctk.CTkProgressBar(self.right_panel, height=20,
                                                       progress_color=self.colors['upload_color'])
         self.upload_progress_bar.pack(fill="x", padx=20, pady=(10, 5))
@@ -1426,11 +1390,10 @@ class TelegramDownloaderGUI:
             text_color = self.colors.get(color) if color else self.colors['text_dim']
             self.upload_progress_label.configure(text=message, text_color=text_color)
         elif self.current_screen == "source" and hasattr(self, '_scan_progress_label'):
-            # Handle scan progress messages
             text_color = self.colors.get(color) if color else self.colors['text_dim']
             self._scan_progress_label.configure(text=message, text_color=text_color)
         else:
-            print(f"[LOG]: {message}")  # Fallback to console
+            print(f"[LOG]: {message}")
 
     # ==================== EVENT HANDLERS ====================
     def browse_directory(self):
@@ -1565,7 +1528,6 @@ class TelegramDownloaderGUI:
             error_msg = f"Connection error: {type(e).__name__}: {str(e)}\n\nMake sure your API credentials are correct or check your network."
             self.root.after(0, lambda msg=error_msg: self._show_error(msg))
             self.root.after(0, self.show_login_screen)
-        # The loop will be closed by _disconnect_and_close_loop on exit or if a new session starts.
 
     def select_account(self, idx):
         """Selects an existing account for login."""
@@ -1719,7 +1681,7 @@ class TelegramDownloaderGUI:
             text_color=self.colors['text_dim'],
             justify="center"
         )
-        self._scan_progress_label.pack(pady=50, expand=True)
+        self.root.after(0, lambda: self._scan_progress_label.pack(pady=50, expand=True))
 
         self.stop_flag.clear()
         threading.Thread(target=self._scan_media_thread_run, daemon=True).start()
@@ -2017,19 +1979,6 @@ class TelegramDownloaderGUI:
     def run(self):
         """Runs the GUI application."""
         self.root.mainloop()
-
-
-if __name__ == "__main__":
-    try:
-        app = TelegramDownloaderGUI()
-        app.run()
-    except KeyboardInterrupt:
-        print("\nGoodbye!")
-    except Exception as e:
-        print(f"Fatal error: {e}")
-        sys.exit(1)
-
-
 
 
 

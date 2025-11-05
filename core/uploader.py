@@ -4,12 +4,10 @@ import os
 import sys
 import asyncio
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable, Union, Tuple  # <--- ADDED Tuple HERE
+from typing import List, Dict, Any, Optional, Callable, Union, Tuple
 
-# Assuming TelegramClientWrapper from core/client
 from .client import TelegramClientWrapper, LogFuncType
 
-# Telethon types for peer resolution
 try:
     from telethon.tl.types import User, Chat, Channel
     from telethon.tl.patched import Message
@@ -19,11 +17,8 @@ except ImportError as e:
     print("Install: pip install telethon")
     sys.exit(1)
 
-# Progress callback type for UI updates (progress_percentage, current_bytes, total_bytes)
-# For single file upload.
 UploadFileProgressCallback = Callable[[float, int, int], None]
 
-# Progress callback type for folder upload (overall_progress, current_file_index, total_files, current_file_bytes, total_file_bytes)
 UploadFolderProgressCallback = Callable[[float, int, int, int, int], None]
 
 
@@ -49,16 +44,15 @@ class MediaUploader:
         if not file_path.is_file():
             return False
 
-        # Common image and video extensions
         media_extensions = {
-            '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp',  # Images
-            '.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv', '.gifv'  # Videos (gifv is often a video)
+            '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp',
+            '.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv', '.gifv'
         }
         return file_path.suffix.lower() in media_extensions
 
     async def upload_single_media(
             self,
-            peer: Union[User, Chat, Channel, int, str],  # Can be entity, ID, or username
+            peer: Union[User, Chat, Channel, int, str],
             file_path: Path,
             caption: Optional[str] = None,
             progress_callback: Optional[UploadFileProgressCallback] = None
@@ -82,14 +76,12 @@ class MediaUploader:
         peer_entity = None
         peer_name_for_log = str(peer)
         try:
-            # Resolve peer entity if it's an ID or username string
             if isinstance(peer, (int, str)):
                 self._log_func(f"Resolving destination '{peer}'...", "blue")
                 peer_entity = await self._client_wrapper.client.get_entity(peer)
             else:
-                peer_entity = peer  # Already an entity object
+                peer_entity = peer
 
-            # Use entity's title or first_name for logging
             peer_name_for_log = getattr(peer_entity, 'title',
                                         getattr(peer_entity, 'first_name', str(peer))).strip()
             self._log_func(f"Attempting to upload '{file_path.name}' to '{peer_name_for_log}'...", "blue")
@@ -99,7 +91,6 @@ class MediaUploader:
             raise ValueError(f"Invalid destination '{peer}'. Please check the ID or username.") from e
 
         try:
-            # Telethon's send_file can take a progress_callback (current, total bytes)
             def telethon_progress_adapter(current: int, total: int):
                 if progress_callback:
                     progress = current / total if total > 0 else 0
@@ -118,11 +109,11 @@ class MediaUploader:
             return message
         except (FloodWaitError, PeerFloodError) as e:
             self._log_func(f"Flood control error while uploading '{file_path.name}': {e}", "yellow")
-            await asyncio.sleep(getattr(e, 'seconds', 5) + 2)  # Wait if flood error, with a buffer
-            raise  # Re-raise after logging and waiting
+            await asyncio.sleep(getattr(e, 'seconds', 5) + 2)
+            raise
         except Exception as e:
             self._log_func(f"Error uploading '{file_path.name}' to '{peer_name_for_log}': {e}", "red")
-            raise  # Re-raise for caller to handle
+            raise
 
     async def upload_folder_media(
             self,
@@ -131,7 +122,7 @@ class MediaUploader:
             caption: Optional[str] = None,
             progress_callback: Optional[UploadFolderProgressCallback] = None,
             stop_flag: Optional[Callable[[], bool]] = None
-    ) -> Tuple[int, int]:  # Returns (uploaded_count, failed_count)
+    ) -> Tuple[int, int]:
         """
         Uploads all detected media files from a specified folder to a peer.
         """
@@ -142,7 +133,7 @@ class MediaUploader:
             self._log_func(f"Folder not found at '{folder_path}'.", "red")
             raise FileNotFoundError(f"Source folder not found: {folder_path}")
         if stop_flag is None:
-            stop_flag = lambda: False  # Default to always continue
+            stop_flag = lambda: False
 
         media_files = [f for f in folder_path.iterdir() if self.is_media_file(f)]
         if not media_files:
@@ -158,11 +149,11 @@ class MediaUploader:
             "blue"
         )
 
-        # Resolve peer entity once to avoid repeated calls in loop
         peer_entity = None
         peer_name_for_log = str(peer)
         try:
             if isinstance(peer, (int, str)):
+                self._log_func(f"Resolving destination '{peer}'...", "blue")
                 peer_entity = await self._client_wrapper.client.get_entity(peer)
             else:
                 peer_entity = peer
@@ -180,16 +171,14 @@ class MediaUploader:
 
             self._log_func(f"[{i + 1}/{total_files}] Uploading '{file_path.name}'...", "blue")
 
-            # Inner progress callback for the single file being uploaded
             def file_progress_adapter(progress_percentage: float, current_bytes: int, total_bytes: int):
                 if progress_callback:
-                    # overall_progress considers total files and current file's progress
                     overall_progress = (uploaded_count + failed_count + progress_percentage) / total_files
                     progress_callback(overall_progress, i + 1, total_files, current_bytes, total_bytes)
 
             try:
                 await self.upload_single_media(
-                    peer_entity,  # Use the already resolved entity
+                    peer_entity,
                     file_path,
                     caption,
                     progress_callback=file_progress_adapter
@@ -199,15 +188,13 @@ class MediaUploader:
                 failed_count += 1
                 self._log_func(f"Failed to upload '{file_path.name}': {e}", "red")
 
-            # Ensure overall progress is updated even if a file fails or finishes without final callback from Telethon
             if progress_callback:
-                # Update overall progress for this file's completion (or failure)
                 overall_progress = (uploaded_count + failed_count) / total_files
-                progress_callback(overall_progress, i + 1, total_files, 0,
-                                  0)  # Current/total file bytes 0 for completion
+                progress_callback(overall_progress, i + 1, total_files, 0, 0)
 
         self._log_func(
             f"Batch upload finished. Uploaded {uploaded_count}/{total_files} files. Failed: {failed_count}",
             "green" if failed_count == 0 else "yellow"
         )
         return uploaded_count, failed_count
+

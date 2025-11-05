@@ -5,6 +5,7 @@ import hashlib
 from typing import List, Optional, Union
 from pathlib import Path
 
+
 class InputValidator:
     """
     Cung cấp các hàm tiện ích để xác thực đầu vào phổ biến.
@@ -16,10 +17,6 @@ class InputValidator:
         Kiểm tra xem số điện thoại có phải là định dạng hợp lệ của Telegram không.
         Telegram thường yêu cầu định dạng quốc tế (ví dụ: +84123456789).
         """
-        # Regex này kiểm tra:
-        # - Bắt đầu bằng '+'
-        # - Theo sau là 1-15 chữ số
-        # - Không chứa khoảng trắng hoặc các ký tự đặc biệt khác ngoài dấu '+'
         if not phone_number:
             return False
         return bool(re.fullmatch(r'^\+[1-9]\d{1,14}$', phone_number))
@@ -56,14 +53,9 @@ class InputValidator:
         """
         if not path_str:
             return False
-        # Chỉ kiểm tra nếu nó là một đường dẫn tương đối hoặc tuyệt đối có vẻ hợp lệ
-        # và không chứa các ký tự cấm đối với tên thư mục (hệ điều hành không phải là vấn đề ở đây)
-        # pathlib.Path sẽ xử lý các đường dẫn không hợp lệ khi tạo folder
         try:
             path = Path(path_str)
-            # Kiểm tra nếu đường dẫn có thể được tạo (mà không thực sự tạo nó)
-            # hoặc nếu nó đã tồn tại và là một thư mục
-            return not (path.is_file()) # Không nên là một file
+            return not (path.is_file())
         except Exception:
             return False
 
@@ -73,25 +65,21 @@ class InputValidator:
         Kiểm tra xem một định danh peer (chat ID, username, phone number) có hợp lệ không.
         """
         if isinstance(identifier, int):
-            return identifier > 0 # ID chat/user thường là số dương
+            return identifier != 0
         elif isinstance(identifier, str):
             identifier = identifier.strip()
             if not identifier:
                 return False
-            # Có thể là @username, ID số dưới dạng chuỗi, hoặc +phone
             if identifier.startswith('@'):
-                return bool(re.fullmatch(r'^@[a-zA-Z0-9_]{5,32}$', identifier)) # Username Telegram min 5, max 32
+                return bool(re.fullmatch(r'^@[a-zA-Z0-9_]{5,32}$', identifier))
             elif identifier.startswith('+'):
                 return InputValidator.is_valid_phone(identifier)
             else:
-                # Có thể là ID số dạng chuỗi, hoặc tên chat
-                # Để đơn giản, coi chuỗi không bắt đầu bằng @ hoặc + là hợp lệ
-                # (sẽ được Telethon giải quyết)
                 try:
                     int(identifier)
-                    return True # Là một ID số dạng chuỗi
+                    return True
                 except ValueError:
-                    return True # Là một tên chat/kênh
+                    return True
         return False
 
 
@@ -106,6 +94,25 @@ class HashingUtilities:
         Tạo một hash SHA256 ổn định từ một danh sách các ID tin nhắn.
         Danh sách được sắp xếp trước để đảm bảo tính nhất quán của hash.
         """
-        # Sắp xếp để hash ổn định, tránh lệch thứ tự
         b = ",".join(str(i) for i in sorted(set(int(x) for x in ids))).encode("utf-8")
         return hashlib.sha256(b).hexdigest()
+
+
+
+
+### File: `tele-downloader-toolkit/cli_app.py`
+
+# !/usr/bin/env python3
+import sys
+from pathlib import Path
+import asyncio
+
+# Add project root to path
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
+
+from ui.cli.commands import cli_main_entry  # Import the main CLI entry point
+
+if __name__ == "__main__":
+    # The cli_main_entry function now handles its own asyncio.run call
+    cli_main_entry()

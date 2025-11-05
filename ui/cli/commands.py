@@ -9,14 +9,19 @@ from typing import List, Dict, Any, Optional, Tuple, Union
 
 import humanize
 
+# Working Directory Setup
+project_root = Path(__file__).parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 # Import core components (Corrected relative imports)
-from ..core.client import TelegramClientWrapper
-from ..core.downloader import MediaDownloader
-from ..core.uploader import MediaUploader
-from ..core.state_manager import StateManager
+from core.client import TelegramClientWrapper
+from core.downloader import MediaDownloader
+from core.uploader import MediaUploader
+from core.state_manager import StateManager
 
 # Import storage components (Corrected relative imports)
-from ..storage import config
+from storage import config
 
 # Import CLI formatting and I/O wrappers from the same directory
 from .formatters import (
@@ -28,11 +33,9 @@ from .formatters import (
     c,
     pad,
     box,
-    # Fore is not used directly here; c() with string color tags is preferred.
 )
 
 
-# --- Helper to initialize and connect core components for a command ---
 async def _initialize_downloader_and_uploader_for_command(
         env_path: Path,
         account_index: int
@@ -90,11 +93,10 @@ async def _initialize_downloader_and_uploader_for_command(
 
 # --- CLI Command Implementations ---
 
-async def run_cli_login(args):
+async def run_cli_login_async(args):  # Đổi tên để dễ gọi từ asyncio.run
     env_path = Path(".env")
     envd = config.load_env(env_path)
 
-    # Determine which account index to use/create
     account_idx_to_use = None
     accounts = []
     idxs = config.get_all_account_indices(envd)
@@ -128,7 +130,6 @@ async def run_cli_login(args):
 
     current_cfg = config.get_account_config(envd, account_idx_to_use)
 
-    # Prompt for missing info, or use provided args/env values
     resolved_phone = args.phone or (current_cfg["PHONE"] if current_cfg["PHONE"] else None) or console_input_func(
         "Enter phone number (e.g., +84123456789)", hide_input=False)
 
@@ -138,14 +139,14 @@ async def run_cli_login(args):
         while True:
             try:
                 resolved_api_id_str = console_input_func("Enter API ID (from my.telegram.org)", hide_input=False)
-                int(resolved_api_id_str)  # Validate it's an int
+                int(resolved_api_id_str)
                 break
             except ValueError:
                 console_log_func("API ID must be a number.", "red")
 
     resolved_api_hash = args.api_hash or (
         current_cfg["API_HASH"] if current_cfg["API_HASH"] else None) or console_input_func(
-        "Enter API Hash (from my.telegram.org)", hide_input=True)  # Mask API hash input
+        "Enter API Hash (from my.telegram.org)", hide_input=True)
 
     resolved_download_dir = args.download_dir or (
         current_cfg["DOWNLOAD_DIR"] if current_cfg["DOWNLOAD_DIR"] else None) or console_input_func(
@@ -153,7 +154,6 @@ async def run_cli_login(args):
         default="downloads",
         hide_input=False)
 
-    # Update envd with resolved details for the selected index
     account_data_to_save = {
         "PHONE": resolved_phone,
         "API_ID": resolved_api_id_str,
@@ -162,9 +162,8 @@ async def run_cli_login(args):
     }
     envd = config.update_account_config(envd, account_idx_to_use, account_data_to_save)
     envd = config.set_current_account_index(envd, account_idx_to_use)
-    config.save_env(env_path, envd)  # Save immediately after updates
+    config.save_env(env_path, envd)
 
-    # Initialize and connect ClientWrapper to verify credentials
     client_wrapper = TelegramClientWrapper(
         api_id=int(resolved_api_id_str),
         api_hash=resolved_api_hash,
@@ -180,7 +179,7 @@ async def run_cli_login(args):
     try:
         if await client_wrapper.connect_client():
             console_log_func(pad(f"Successfully logged in with account #{account_idx_to_use}.", WIDTH, "left"), "green")
-            await client_wrapper.disconnect_client()  # Disconnect after successful auth
+            await client_wrapper.disconnect_client()
             console_log_func(
                 pad(f"Login command finished. Active account set to #{account_idx_to_use}.", WIDTH, "left"), "green")
         else:
@@ -191,7 +190,11 @@ async def run_cli_login(args):
         console_log_func(pad("Login command failed.", WIDTH, "left"), "red")
 
 
-async def run_cli_logout(args):
+def run_cli_login(args):
+    asyncio.run(run_cli_login_async(args))
+
+
+async def run_cli_logout_async(args):  # Đổi tên
     env_path = Path(".env")
     envd = config.load_env(env_path)
 
@@ -203,7 +206,6 @@ async def run_cli_logout(args):
 
     console_log_func(pad(f"Logging out account #{idx_to_logout}...", WIDTH, "left"), "blue")
 
-    # Attempt to disconnect client if session file might exist
     try:
         acc_cfg = config.get_account_config(envd, idx_to_logout)
         if all([acc_cfg["PHONE"], acc_cfg["API_ID"], acc_cfg["API_HASH"]]):
@@ -244,7 +246,11 @@ async def run_cli_logout(args):
     console_log_func(pad(f"Account #{idx_to_logout} logged out successfully.", WIDTH, "left"), "green")
 
 
-async def run_cli_reset(args):
+def run_cli_logout(args):
+    asyncio.run(run_cli_logout_async(args))
+
+
+async def run_cli_reset_async(args):  # Đổi tên
     env_path = Path(".env")
     envd = config.load_env(env_path)
 
@@ -280,7 +286,11 @@ async def run_cli_reset(args):
     console_log_func(pad("All configurations and session files have been reset.", WIDTH, "left"), "green")
 
 
-async def run_cli_upload(args):
+def run_cli_reset(args):
+    asyncio.run(run_cli_reset_async(args))
+
+
+async def run_cli_upload_async(args):  # Đổi tên
     env_path = Path(".env")
     current_account_idx = config.get_current_account_index(config.load_env(env_path))
 
@@ -334,7 +344,11 @@ async def run_cli_upload(args):
         await client_wrapper.disconnect_client()
 
 
-async def run_cli_download(args):
+def run_cli_upload(args):
+    asyncio.run(run_cli_upload_async(args))
+
+
+async def run_cli_download_async(args):  # Đổi tên
     env_path = Path(".env")
     current_account_idx = config.get_current_account_index(config.load_env(env_path))
 
@@ -434,7 +448,11 @@ async def run_cli_download(args):
         await client_wrapper.disconnect_client()
 
 
-async def run_cli_status(args):
+def run_cli_download(args):
+    asyncio.run(run_cli_download_async(args))
+
+
+async def run_cli_status_async(args):  # Đổi tên
     env_path = Path(".env")
     envd = config.load_env(env_path)
     current_account_idx = config.get_current_account_index(envd)
@@ -468,7 +486,11 @@ async def run_cli_status(args):
         console_log_func(pad(f"Error retrieving status for account #{current_account_idx}: {e}", WIDTH, "left"), "red")
 
 
-async def cli_main_entry():
+def run_cli_status(args):
+    asyncio.run(run_cli_status_async(args))
+
+
+def cli_main_entry():  # Không async
     parser = argparse.ArgumentParser(
         description="Telegram Media Downloader and Uploader CLI",
         formatter_class=argparse.RawTextHelpFormatter
@@ -530,23 +552,10 @@ async def cli_main_entry():
     config.ensure_env_exists(env_path)
 
     if hasattr(args, 'func'):
-        asyncio.run(args.func(args))
+        # Gọi hàm tương ứng, các hàm này đã tự gọi asyncio.run bên trong
+        args.func(args)
     else:
         parser.print_help()
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(cli_main_entry())
-    except KeyboardInterrupt:
-        console_log_func(pad("CLI operation interrupted. Goodbye!", WIDTH, "left"), "red")
-    except Exception as e:
-        console_log_func(pad(f"Fatal CLI error: {e}", WIDTH, "left"), "red")
-        sys.exit(1)
-
-
-
-
 
 
 

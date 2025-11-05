@@ -9,11 +9,9 @@ import asyncio
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, Union
 
-# Assuming TelegramClientWrapper and StateManager are in core/
 from .client import TelegramClientWrapper, LogFuncType, InputFuncType
 from .state_manager import StateManager
 
-# Telethon types for media detection
 try:
     from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, User, Chat, Channel
     from telethon.errors import FloodWaitError, PeerFloodError
@@ -22,10 +20,8 @@ except ImportError as e:
     print("Install: pip install telethon")
     sys.exit(1)
 
-# Progress callback type for UI updates (e.g., progress, current_processed, total_items, current_stats)
 DownloadProgressCallback = Callable[[float, int, int, Dict[str, Any]], None]
-ScanProgressCallback = Callable[
-    [int, Optional[int]], None]  # current_messages_scanned, total_dialog_messages (optional)
+ScanProgressCallback = Callable[[int, Optional[int]], None]
 
 
 class MediaDownloader:
@@ -47,7 +43,6 @@ class MediaDownloader:
 
         self.state = StateManager(self.account_index)
 
-        # Ensure download directories exist
         self.download_dir.mkdir(parents=True, exist_ok=True)
 
         self.stats = {
@@ -60,7 +55,7 @@ class MediaDownloader:
             'total_size': 0,
         }
 
-        self.media_list: List[Dict[str, Any]] = []  # Stores all found media before filtering
+        self.media_list: List[Dict[str, Any]] = []
 
     @property
     def client(self):
@@ -111,14 +106,14 @@ class MediaDownloader:
         self.stats = {
             'total_found': 0, 'images_found': 0, 'videos_found': 0,
             'downloaded': 0, 'skipped': 0, 'errors': 0, 'total_size': 0,
-        }  # Reset stats for new scan
+        }
 
         for entity in dialog_entities:
             try:
                 async for message in self._client_wrapper.client.iter_messages(entity):
                     message_count += 1
                     if progress_callback:
-                        progress_callback(message_count, None)  # Total messages in dialog unknown
+                        progress_callback(message_count, None)
 
                     if not getattr(message, "media", None):
                         continue
@@ -139,7 +134,7 @@ class MediaDownloader:
 
         self.stats['total_found'] = len(media_messages)
         if progress_callback:
-            progress_callback(message_count, message_count)  # Final count with total messages scanned
+            progress_callback(message_count, message_count)
 
         self._log_func(
             f"Found {len(media_messages)} media in {message_count} messages across {len(dialog_entities)} dialog(s).",
@@ -160,7 +155,7 @@ class MediaDownloader:
         self.stats = {
             'total_found': 0, 'images_found': 0, 'videos_found': 0,
             'downloaded': 0, 'skipped': 0, 'errors': 0, 'total_size': 0,
-        }  # Reset stats for new scan
+        }
 
         try:
             async for message in self._client_wrapper.client.iter_messages('me'):
@@ -201,7 +196,7 @@ class MediaDownloader:
         if mime.startswith("image/"):
             if 'png' in mime: return '.png'
             if 'gif' in mime: return '.gif'
-            return ".jpg"  # Default for photos from Telegram
+            return ".jpg"
         return ""
 
     def _target_path_for(self, media_info: Dict[str, Any]) -> Path:
@@ -209,15 +204,13 @@ class MediaDownloader:
         message = media_info['message']
         file_type = media_info['type']
 
-        # Create year/month subfolders within the configured download_dir
         year_folder = self.download_dir / str(message.date.year)
         month_folder = year_folder / f"{message.date.month:02d}"
-        month_folder.mkdir(parents=True, exist_ok=True)  # Ensure path exists
+        month_folder.mkdir(parents=True, exist_ok=True)
 
         if file_type == 'photo':
-            # Telethon photos are typically JPG
             return month_folder / f"photo_{message.id}.jpg"
-        else:  # video
+        else:
             doc = message.media.document
             mime = getattr(doc, "mime_type", "") or ""
             orig_name = None
@@ -231,7 +224,6 @@ class MediaDownloader:
     @staticmethod
     def _hash_ids(ids: List[int]) -> str:
         """Generates a stable SHA256 hash from a list of message IDs."""
-        # Sort for stable hashing, regardless of original iteration order
         b = ",".join(str(i) for i in sorted(set(int(x) for x in ids))).encode("utf-8")
         return hashlib.sha256(b).hexdigest()
 
@@ -257,16 +249,14 @@ class MediaDownloader:
             msg = item["message"]
             target_path = self._target_path_for(item)
 
-            # Check if already completed from state or file exists and is not empty
             if self.state.is_completed(int(msg.id)) or (target_path.exists() and os.path.getsize(target_path) > 0):
                 self.stats['skipped'] += 1
-                self.state.mark_completed(int(msg.id))  # Ensure marked as completed
+                self.state.mark_completed(int(msg.id))
                 self._log_func(f"Skipping Message ID {msg.id}: Already downloaded or file exists.", "yellow")
             else:
                 try:
                     self._log_func(f"Downloading Message ID {msg.id} to {target_path.name}...", "blue")
 
-                    # Telethon's download_media is robust but might need a direct file path
                     path_str = await self._client_wrapper.client.download_media(msg, file=str(target_path))
 
                     if path_str and Path(path_str).exists():
@@ -284,7 +274,7 @@ class MediaDownloader:
                         f"Flood wait error while downloading: Waiting {e.seconds} seconds...",
                         "yellow"
                     )
-                    await asyncio.sleep(e.seconds + 5)  # Add a buffer
+                    await asyncio.sleep(e.seconds + 5)
                     self.stats['errors'] += 1
                 except PeerFloodError:
                     self._log_func(
@@ -301,7 +291,6 @@ class MediaDownloader:
             if progress_callback:
                 progress_callback(progress, current_processed, total_items, self.stats.copy())
 
-        # Ensure final progress update
         if progress_callback:
             progress_callback(1.0, total_items, total_items, self.stats.copy())
 
@@ -310,20 +299,19 @@ class MediaDownloader:
     async def run_download_flow(self,
                                 src_type: str,
                                 chosen_entities: Optional[List[Union[User, Chat, Channel]]] = None,
-                                media_filter: str = "3",  # 1=photos, 2=videos, 3=both
+                                media_filter: str = "3",
                                 confirm_reset_callback: Optional[Callable[[str, str], bool]] = None,
                                 scan_progress_callback: Optional[ScanProgressCallback] = None,
                                 download_progress_callback: Optional[DownloadProgressCallback] = None,
-                                stop_flag: Optional[Callable[[], bool]] = None  # To allow external stop
+                                stop_flag: Optional[Callable[[], bool]] = None
                                 ) -> bool:
         """
         Executes the full media download flow: scan, filter, check state, and download.
         Returns True if successful, False otherwise or if cancelled.
         """
         if stop_flag is None:
-            stop_flag = lambda: False  # Default to always continue
+            stop_flag = lambda: False
 
-        # 1) Scan media based on source type
         if src_type == "saved":
             scanned_media = await self.scan_saved_messages(scan_progress_callback)
             dialog_ids_for_state = ["me"]
@@ -339,16 +327,14 @@ class MediaDownloader:
 
         if not scanned_media:
             self._log_func("No media found for download.", "yellow")
-            self.media_list = []  # Clear previous list
+            self.media_list = []
             return False
 
-        self.media_list = scanned_media  # Store all found media before filtering
+        self.media_list = scanned_media
 
-        # 2) Calculate hash of message IDs for state comparison
         current_message_ids = [int(m['message'].id) for m in scanned_media]
         ids_hash = self._hash_ids(current_message_ids)
 
-        # 3) Check for hash mismatch with previous session state
         prev_source = self.state.get_source()
         hash_mismatch = False
         if prev_source and prev_source.get("type") == src_type:
@@ -360,11 +346,9 @@ class MediaDownloader:
                 if prev_hash and prev_hash != ids_hash:
                     hash_mismatch = True
 
-        # 4) Save current source, total found, and hash to state
         self.state.set_source(src_type, dialog_ids_for_state, total_found=len(scanned_media), ids_hash=ids_hash,
                               last_filter=media_filter)
 
-        # 5) If hash mismatch, prompt for reset
         if hash_mismatch:
             self._log_func("Media list changed since last session (hash mismatch).", "yellow")
             should_reset = False
@@ -373,9 +357,7 @@ class MediaDownloader:
                                                       "Media list has changed since last session. Reset progress?")
             else:
                 self._log_func("No confirmation callback provided for hash mismatch. Cannot prompt for reset.", "red")
-                # Decide default behavior if no callback (e.g., continue without reset or stop)
-                # For CLI-like, could default to "no"
-                should_reset = False  # Default to not reset if no confirmation mechanism
+                should_reset = False
 
             if should_reset:
                 self.state.clear_progress()
@@ -383,13 +365,11 @@ class MediaDownloader:
             else:
                 self._log_func("Continuing with existing progress.", "yellow")
 
-        # 6) Apply filter
         filtered_media = self.filter_media_list(scanned_media, media_filter)
         if not filtered_media:
             self._log_func("No media found after applying filter.", "yellow")
             return False
 
-        # 7) Apply resume logic: remove already completed items
         resumable_media = []
         initial_skipped_count = 0
         for m in filtered_media:
@@ -397,18 +377,17 @@ class MediaDownloader:
             target = self._target_path_for(m)
             if self.state.is_completed(mid) or (target.exists() and os.path.getsize(target) > 0):
                 initial_skipped_count += 1
-                self.state.mark_completed(mid)  # Ensure state is updated even if file exists
+                self.state.mark_completed(mid)
                 continue
             resumable_media.append(m)
 
-        self.stats['skipped'] = initial_skipped_count  # Update initial skipped count
+        self.stats['skipped'] = initial_skipped_count
 
         if not resumable_media:
             self._log_func("No items left to download (all completed or skipped).", "green")
-            return True  # Successfully "completed" the download (nothing new to do)
+            return True
 
-        # 8) Download the resumable media batch
-        if stop_flag():  # Check stop flag before starting download
+        if stop_flag():
             self._log_func("Download aborted before starting.", "red")
             return False
 
@@ -421,9 +400,9 @@ class MediaDownloader:
         Filters a list of media messages based on the specified type.
         filter_type: "1" for photos, "2" for videos, "3" for both.
         """
-        if filter_type == "1":  # Photos only
+        if filter_type == "1":
             return [m for m in media_list if m['type'] == 'photo']
-        elif filter_type == "2":  # Videos only
+        elif filter_type == "2":
             return [m for m in media_list if m['type'] == 'video']
-        else:  # Both or invalid filter, default to both
+        else:
             return media_list

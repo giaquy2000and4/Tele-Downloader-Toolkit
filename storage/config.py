@@ -12,7 +12,6 @@ except ImportError as e:
     print("Install: pip install python-dotenv")
     sys.exit(1)
 
-# Template for the .env file if it doesn't exist
 ENV_TEMPLATE = """# Telegram Media Toolkit Configuration
 # Multi-account support: Each account is prefixed with ACCOUNT_N_ where N is the index.
 # CURRENT_ACCOUNT specifies which account index is currently active.
@@ -26,8 +25,8 @@ CURRENT_ACCOUNT=0
 # ACCOUNT_1_DOWNLOAD_DIR=/absolute/path/to/downloads
 #
 # You can add more accounts by incrementing the index:
-# ACCOUNT_2_PHONE=+84987654321
-# ACCOUNT_2_API_ID=987654
+# ACCOUNT_2_PHONE=+84999888777
+# ACCOUNT_2_API_ID=654321
 # ACCOUNT_2_API_HASH=yyyyyyyyyyyyyyyyyyyyyyyyyyyy
 # ACCOUNT_2_DOWNLOAD_DIR=/absolute/path/to/downloads_account_2
 """
@@ -45,9 +44,7 @@ def load_env(env_path: Path) -> Dict[str, str]:
     """
     Loads environment variables from the .env file into os.environ and returns them as a dictionary.
     """
-    # Load into os.environ
     load_dotenv(dotenv_path=str(env_path))
-    # Also parse for direct access, as os.environ might be slow or not desired for all lookups
     return dotenv_values(dotenv_path=str(env_path))
 
 
@@ -60,7 +57,6 @@ def save_env(env_path: Path, data: Dict[str, str]) -> None:
     for k, v in data.items():
         set_key(dotenv_path=str(env_path), key_to_set=k, value_to_set=v)
 
-    # After saving, reload to ensure internal state (e.g., in os.environ) is consistent
     load_dotenv(dotenv_path=str(env_path), override=True)
 
 
@@ -87,9 +83,8 @@ def get_account_config(envd: Dict[str, str], idx: int) -> Dict[str, str]:
         "DOWNLOAD_DIR": envd.get(f"ACCOUNT_{idx}_DOWNLOAD_DIR", ""),
     }
 
-    # Provide a default download directory if not specified for the account
     if not config["DOWNLOAD_DIR"]:
-        config["DOWNLOAD_DIR"] = "downloads"  # A safe default relative to execution dir
+        config["DOWNLOAD_DIR"] = "downloads"
 
     return config
 
@@ -137,7 +132,6 @@ def delete_account_config(envd: Dict[str, str], idx: int) -> Dict[str, str]:
     for key in keys_to_delete:
         envd.pop(key, None)
 
-    # If the current active account is being deleted, reset CURRENT_ACCOUNT
     if get_current_account_index(envd) == idx:
         envd["CURRENT_ACCOUNT"] = "0"
 
@@ -154,3 +148,6 @@ def get_all_account_indices(envd: Dict[str, str]) -> List[int]:
         if k.startswith("ACCOUNT_") and k.endswith("_PHONE") and k.split("_")[1].isdigit()
     }
     return sorted(list(idxs))
+
+
+

@@ -1,6 +1,8 @@
+# tele-downloader-toolkit/ui/cli/formatters.py
+
 import sys
 import os
-import re  # Import re for regex operations
+import re
 from typing import Optional, Dict, Any, Callable, List
 
 try:
@@ -19,10 +21,10 @@ except ImportError:
 try:
     from tqdm import tqdm
 except ImportError:
-    tqdm = lambda x, **kwargs: x  # Dummy tqdm if not installed
+    tqdm = lambda x, **kwargs: x
 
-import getpass  # For sensitive input in CLI
-import humanize  # For human-readable sizes
+import getpass
+import humanize
 
 # ============================ UI Configuration (Console-specific) =============================
 
@@ -100,8 +102,8 @@ def box(lines: List[str], width: int = WIDTH) -> str:
 
         formatted_inner_lines.append("│" + display_s_padded + "│")
 
-    box_lines = [top] + formatted_inner_lines + [bottom]
-    return '\n'.join(box_lines)
+    joined_lines = '\n'.join(formatted_inner_lines)
+    return f"{top}\n{joined_lines}\n{bottom}"
 
 
 # ============================ CLI-specific I/O Functions =============================
@@ -164,8 +166,8 @@ def cli_progress_callback(
     else:
         message_content = f'Progress: |{bar}| {percent}% ({current_processed_items_or_bytes}/{total_items_or_bytes})'
 
-    # Use separate string literals for escape sequences (Python 3.10 compatibility)
-    sys.stdout.write('\r' + message_content)
+    sys.stdout.write("\r")
+    sys.stdout.write(message_content)
     sys.stdout.flush()
     if progress >= 1.0:
         sys.stdout.write('\n')
@@ -177,8 +179,8 @@ def cli_scan_progress_callback(current_messages_scanned: int, total_messages: Op
     total_messages is often not known upfront during iteration.
     """
     message_content = f'Scanning... Processed {current_messages_scanned} messages. '
-    # Use separate string literals for escape sequences (Python 3.10 compatibility)
-    sys.stdout.write('\r' + message_content)
+    sys.stdout.write("\r")
+    sys.stdout.write(message_content)
     sys.stdout.flush()
     if total_messages is not None and current_messages_scanned >= total_messages:
         sys.stdout.write('\n')

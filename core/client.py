@@ -22,10 +22,6 @@ except ImportError as e:
     print("Install: pip install telethon")
     sys.exit(1)
 
-# Assume basic UI logging/input functions will be provided by CLI/GUI modules
-# For example, from ui.cli.formatters or ui.gui.app
-# A placeholder is used here for type hints.
-
 LogFuncType = Callable[[str, Optional[str]], None]
 InputFuncType = Callable[[str, Optional[str], bool], str]
 
@@ -52,15 +48,12 @@ class TelegramClientWrapper:
         self._log_func = log_func
         self._input_func = input_func
 
-        # Ensure the sessions directory exists
         session_dir = Path("sessions")
         session_dir.mkdir(exist_ok=True)
         session_path = session_dir / f"session_{account_index}"
 
-        # Initialize Telethon client
         self._client = TelegramClient(str(session_path), api_id, api_hash)
 
-        # Public attribute to access the raw Telethon client instance if needed
         self.client = self._client
 
     async def connect_client(self) -> bool:
@@ -75,7 +68,6 @@ class TelegramClientWrapper:
             if not await self._client.is_user_authorized():
                 self._log_func("Authorization required. Signing in...", "yellow")
                 try:
-                    # Mask phone number for logging, keep original for sending code
                     masked_phone = self.phone[:3] + "****" + self.phone[-4:] if len(self.phone) > 7 else self.phone
                     self._log_func(
                         f"Attempting to login account #{self.account_index} ({masked_phone}) → sending code...",
@@ -86,7 +78,6 @@ class TelegramClientWrapper:
                     self._log_func(f"Too many attempts. Please wait {e.seconds} seconds.", "red")
                     return False
 
-                # Handle sign-in after code request
                 try:
                     code = self._input_func("Enter the code from Telegram", None, False)
                     await self._client.sign_in(self.phone, code=code)
@@ -111,8 +102,7 @@ class TelegramClientWrapper:
 
         except FloodWaitError as e:
             self._log_func(f"Telegram FloodWaitError: Waiting {e.seconds} seconds before next attempt.", "yellow")
-            # In a GUI, you might want to show a countdown or disable buttons
-            await asyncio.sleep(e.seconds + 5)  # Add a buffer
+            await asyncio.sleep(e.seconds + 5)
             return False
         except Exception as e:
             self._log_func(f"Connection error: {e}", "red")
@@ -135,9 +125,3 @@ class TelegramClientWrapper:
     async def is_authorized(self) -> bool:
         """Checks if the user is authorized."""
         return await self._client.is_user_authorized()
-
-    # You can add more helper methods here if common Telethon operations
-    # need specific wrapping or logging, e.g.:
-    # async def get_dialogs(self) -> List[Any]:
-    #     self._log_func("Fetching dialogs...", "blue")
-    #     return await self._client.iter_dialogs()
