@@ -9,12 +9,10 @@ class DialogSelector(ft.UserControl):
         self.dialogs = []
         self.selected_id = None
 
-        # --- LOGIC SỬA LỖI OVERLAP/MATRIX ---
         if height is None:
-            self.expand = True  # Báo cho cha biết widget này cần giãn tối đa
+            self.expand = True
         else:
-            self.height = height  # Dùng chiều cao cố định
-        # ------------------------------------
+            self.height = height
 
         self.list_view = ft.ListView(expand=True, spacing=2, padding=5)
         self.search_box = ft.TextField(
@@ -29,13 +27,16 @@ class DialogSelector(ft.UserControl):
         self.status_text = ft.Text("", size=12, color="grey")
 
     async def load_dialogs(self):
-        if self.dialogs: return
+        # --- SỬA LỖI TẠI ĐÂY: Xóa dòng kiểm tra cache cũ ---
+        # if self.dialogs: return  <-- Đã xóa dòng này
 
         self.loading.visible = True
-        self.status_text.value = "Đang tải danh sách..."
+        self.status_text.value = "Đang tải danh sách mới nhất..."
+        self.list_view.controls.clear()  # Xóa list cũ trên UI
         self.update()
 
         try:
+            # Luôn lấy dữ liệu mới từ Telegram
             self.dialogs = await self.client.get_dialogs(limit=100)
             self.render_list(self.dialogs)
             self.status_text.value = f"Tìm thấy {len(self.dialogs)} kết quả."
@@ -45,6 +46,7 @@ class DialogSelector(ft.UserControl):
         self.loading.visible = False
         self.update()
 
+    # ... (Các hàm render_list, handle_click, filter_dialogs, build GIỮ NGUYÊN) ...
     def render_list(self, data):
         self.list_view.controls.clear()
         if not data:
@@ -95,7 +97,6 @@ class DialogSelector(ft.UserControl):
             self.render_list(filtered)
 
     def build(self):
-        # Container này giờ chỉ cần chứa nội dung, việc expand đã được xử lý ở __init__
         return ft.Container(
             border=ft.border.all(1, ft.colors.OUTLINE),
             border_radius=10,

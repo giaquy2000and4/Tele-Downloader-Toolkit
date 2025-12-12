@@ -4,20 +4,24 @@ from storage.config import Config
 
 
 class TeleClient:
-    _instance = None
+    # Bỏ Singleton (_instance) để hỗ trợ đa tài khoản login cùng lúc nếu cần
+    # Hoặc đơn giản là khởi tạo lại khi đổi acc
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(TeleClient, cls).__new__(cls)
-            cls._instance.client = TelegramClient(
-                f"storage/{Config.SESSION_NAME}",
-                Config.API_ID,
-                Config.API_HASH
-            )
-        return cls._instance
+    def __init__(self, session_name=None):
+        # Nếu không truyền tên session, dùng tên mặc định trong config
+        self.session_name = session_name if session_name else Config.SESSION_NAME
+
+        self.client = TelegramClient(
+            f"storage/{self.session_name}",
+            Config.API_ID,
+            Config.API_HASH
+        )
 
     async def connect(self):
         await self.client.connect()
+
+    async def disconnect(self):
+        await self.client.disconnect()
 
     async def is_user_authorized(self):
         return await self.client.is_user_authorized()
@@ -28,11 +32,13 @@ class TeleClient:
     async def sign_in(self, phone=None, code=None, password=None):
         await self.client.sign_in(phone=phone, code=code, password=password)
 
+    async def get_me(self):
+        return await self.client.get_me()
+
     def get_client(self):
         return self.client
 
     async def get_dialogs(self, limit=100):
-        """Lấy danh sách chat (Tối ưu async để tránh treo UI)"""
         if not self.client.is_connected():
             await self.client.connect()
 
@@ -51,7 +57,6 @@ class TeleClient:
                     "type": entity_type,
                     "entity": dialog.entity
                 })
-                # Nghỉ cực ngắn để UI có thời gian vẽ lại
                 await asyncio.sleep(0.001)
         except Exception as e:
             print(f"Error getting dialogs: {e}")

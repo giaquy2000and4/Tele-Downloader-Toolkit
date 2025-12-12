@@ -5,6 +5,7 @@ tele-downloader-toolkit/
 │   ├── downloader.py
 │   ├── uploader.py
 │   └── state_manager.py
+│   └── session_manager.py
 ├── storage/
 │   ├── __init__.py
 │   ├── config.py

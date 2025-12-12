@@ -1,154 +1,244 @@
 import flet as ft
+import asyncio
+import humanize
 from core.downloader import Downloader
-from utils.progress import ProgressTracker
 from ui.gui.widgets.dialog_selector import DialogSelector
+from storage.database import db
 
 
+# --- ITEM HIỂN THỊ TỪNG FILE DOWNLOAD ---
+class DownloadTaskItem(ft.UserControl):
+    def __init__(self, task_data, downloader, client, page_ref):
+        super().__init__()
+        # Giải nén dữ liệu từ DB
+        self.task_id = task_data[0]
+        self.chat_id = task_data[1]
+        self.msg_id = task_data[2]
+        self.filename = task_data[3]
+        self.total = task_data[5]
+        self.current = task_data[6]
+        self.status = task_data[7]
+
+        self.downloader = downloader
+        self.client = client
+        self.page_ref = page_ref
+
+        self.cancel_event = asyncio.Event()
+
+        # UI Components
+        self.progress_bar = ft.ProgressBar(value=self.current / self.total if self.total > 0 else 0, height=5,
+                                           color="blue", bgcolor="grey")
+        self.lbl_status = ft.Text(self.status, size=12, color="white")
+        self.lbl_size = ft.Text(f"{humanize.naturalsize(self.current)} / {humanize.naturalsize(self.total)}", size=10)
+
+        icon = ft.icons.PLAY_ARROW
+        if self.status == 'downloading':
+            icon = ft.icons.PAUSE
+        elif self.status == 'completed':
+            icon = ft.icons.CHECK
+
+        self.btn_control = ft.IconButton(
+            icon=icon,
+            on_click=self.toggle_download,
+            icon_color="white"
+        )
+
+    def build(self):
+        return ft.Container(
+            padding=10,
+            bgcolor=ft.colors.with_opacity(0.05, "white"),
+            border_radius=5,
+            margin=ft.margin.only(bottom=5),
+            content=ft.Column([
+                ft.Row([
+                    ft.Icon(ft.icons.FILE_DOWNLOAD, color="blue"),
+                    ft.Text(self.filename, weight="bold", expand=True, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                    self.lbl_status,
+                    self.btn_control
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                self.progress_bar,
+                self.lbl_size
+            ])
+        )
+
+    async def toggle_download(self, e=None):
+        if self.status == 'downloading':
+            # ACTION: PAUSE
+            self.cancel_event.set()
+            self.status = 'paused'
+            self.btn_control.icon = ft.icons.PLAY_ARROW
+            self.lbl_status.value = "Paused"
+            self.lbl_status.color = "yellow"
+        else:
+            # ACTION: RESUME / START
+            if self.status == 'completed': return
+
+            self.cancel_event.clear()
+            self.status = 'downloading'
+            self.btn_control.icon = ft.icons.PAUSE
+            self.lbl_status.value = "Downloading..."
+            self.lbl_status.color = "blue"
+            self.update()
+
+            try:
+                # Lấy message object thực tế từ Telegram để tải
+                msgs = await self.client.get_messages(self.chat_id, ids=self.msg_id)
+
+                if msgs and msgs.media:
+                    await self.downloader.download_with_resume(
+                        msgs, self.filename, self.task_id, db, self.update_ui_progress, self.cancel_event
+                    )
+
+                    if not self.cancel_event.is_set():
+                        self.status = 'completed'
+                        self.btn_control.icon = ft.icons.CHECK
+                        self.btn_control.disabled = True
+                        self.lbl_status.value = "Completed"
+                        self.lbl_status.color = "green"
+                        self.progress_bar.value = 1.0
+                        self.progress_bar.color = "green"
+                else:
+                    self.status = 'error'
+                    self.lbl_status.value = "Msg not found"
+                    self.lbl_status.color = "red"
+            except Exception as ex:
+                self.status = 'error'
+                self.lbl_status.value = "Error"
+                print(f"Download Error: {ex}")
+
+        self.update()
+
+    def update_ui_progress(self, pct, current, total):
+        self.current = current
+        self.progress_bar.value = pct
+        self.lbl_size.value = f"{humanize.naturalsize(current)} / {humanize.naturalsize(total)}"
+        self.update()
+
+
+# --- MÀN HÌNH CHÍNH DOWNLOAD ---
 class DownloadScreen:
     def __init__(self, page, tele_client):
         self.page = page
         self.client = tele_client.get_client()
+        self.downloader = Downloader(self.client, tele_client.session_name)
         self.tele_client_wrapper = tele_client
-        self.downloader = Downloader(self.client)
 
-        # --- CỘT TRÁI ---
-        self.link_input = ft.TextField(label="Dán Link bài viết", expand=True)
-        self.selected_chat = None
-        self.lbl_selected_source = ft.Text("Chưa chọn nhóm nào", italic=True, color="yellow", size=12)
+        # Danh sách Task (Container chứa các DownloadTaskItem)
+        self.task_list_col = ft.Column(scroll=ft.ScrollMode.AUTO, spacing=5)
 
-        # Màn hình Download: Không truyền height => Tự động expand
+        # Phần chọn nguồn (Scan)
         self.dialog_selector = DialogSelector(self.tele_client_wrapper, self.on_source_selected)
-
-        self.msg_limit_input = ft.TextField(label="Số lượng", value="20", width=80, keyboard_type="number",
+        self.selected_chat = None
+        self.msg_limit_input = ft.TextField(label="Số lượng tin", value="5", width=100, keyboard_type="number",
                                             text_size=12, content_padding=10)
+        self.lbl_selected = ft.Text("Chưa chọn nhóm nào (Chọn bên dưới)", italic=True, color="yellow", size=12)
 
-        # --- CỘT PHẢI ---
-        self.progress_bar = ft.ProgressBar(value=0, visible=False, color="green", bgcolor="grey")
-        self.progress_text = ft.Text("", visible=False, size=12)
-        self.status_log = ft.ListView(expand=True, spacing=2, auto_scroll=True)
+        # Load lịch sử cũ từ Database
+        self.load_tasks_from_db()
 
-    def log(self, msg, color="white"):
-        self.status_log.controls.append(ft.Text(f"> {msg}", color=color, size=13, font_family="Consolas"))
-        self.page.update()
-
-    def update_progress(self, percentage, msg):
-        self.progress_bar.value = percentage
-        self.progress_text.value = msg
-        self.page.update()
+    def load_tasks_from_db(self):
+        try:
+            tasks = db.get_all_tasks(self.tele_client_wrapper.session_name)
+            for task in tasks:
+                item = DownloadTaskItem(task, self.downloader, self.client, self.page)
+                self.task_list_col.controls.append(item)
+        except Exception as e:
+            print(f"Error loading DB: {e}")
 
     def on_source_selected(self, chat):
         self.selected_chat = chat
-        self.lbl_selected_source.value = f"✅ {chat['name']} (ID: {chat['id']})"
-        self.lbl_selected_source.color = "green"
-        self.lbl_selected_source.weight = "bold"
+        self.lbl_selected.value = f"✅ {chat['name']} (ID: {chat['id']})"
+        self.lbl_selected.color = "green"
+        self.lbl_selected.weight = "bold"
         self.page.update()
 
-    async def start_download_link(self, e):
-        url = self.link_input.value
-        if not url: return
-        self.log(f"Link: {url}", "cyan")
-        self.progress_bar.visible = True;
-        self.page.update()
-        try:
-            if "t.me/" in url:
-                parts = url.rstrip('/').split('/')
-                msg_id = int(parts[-1]);
-                chat = parts[-2]
-                if chat == "c":
-                    chat_id = int("-100" + parts[-3]); message = await self.client.get_messages(chat_id, ids=msg_id)
-                else:
-                    message = await self.client.get_messages(chat, ids=msg_id)
-
-                if message and message.media:
-                    tracker = ProgressTracker(self.update_progress)
-                    path = await self.downloader.download_message_media(message, tracker.callback)
-                    self.log(f"OK: {path}", "green")
-                else:
-                    self.log("Không có media.", "orange")
-        except Exception as ex:
-            self.log(f"Lỗi: {str(ex)}", "red")
-        self.progress_bar.visible = False;
-        self.page.update()
-
-    async def start_scan_download(self, e):
+    async def add_task_to_queue(self, e):
         if not self.selected_chat:
-            self.log("Chưa chọn nhóm bên cột trái!", "red");
+            self.lbl_selected.value = "❌ Vui lòng chọn nhóm trước!";
+            self.lbl_selected.color = "red"
+            self.page.update()
             return
+
         try:
             limit = int(self.msg_limit_input.value)
         except:
-            limit = 10
+            limit = 5
 
-        self.log(f"Quét {limit} tin từ '{self.selected_chat['name']}'...", "cyan")
-        self.progress_bar.visible = True;
+        self.lbl_selected.value = f"⏳ Đang quét {limit} tin nhắn..."
+        self.lbl_selected.color = "cyan"
         self.page.update()
-        count = 0
+
         try:
-            messages = await self.client.get_messages(self.selected_chat['entity'], limit=limit)
-            for msg in messages:
+            msgs = await self.client.get_messages(self.selected_chat['entity'], limit=limit)
+            count = 0
+
+            for msg in msgs:
                 if msg.media:
-                    self.log(f"Tải ID {msg.id}...", "yellow")
-                    tracker = ProgressTracker(self.update_progress)
-                    path = await self.downloader.download_message_media(msg, tracker.callback)
-                    if path: self.log(f"-> {path}", "green"); count += 1
-            self.log(f"Hoàn tất. {count} files.", "blue")
+                    # Tạo tên file: ID_TênFileGốc
+                    fname = f"{msg.id}_{msg.file.name}" if msg.file.name else f"{msg.id}_file{msg.file.ext}"
+
+                    # 1. Lưu vào Database
+                    task_id = db.add_task(
+                        chat_id=self.selected_chat['id'],
+                        message_id=msg.id,
+                        file_name=fname,
+                        save_path="",
+                        total_size=msg.file.size,
+                        account_name=self.tele_client_wrapper.session_name
+                    )
+
+                    # 2. Tạo Item trên UI
+                    task_data = (task_id, self.selected_chat['id'], msg.id, fname, "", msg.file.size, 0, 'pending',
+                                 self.tele_client_wrapper.session_name)
+
+                    item = DownloadTaskItem(task_data, self.downloader, self.client, self.page)
+                    self.task_list_col.controls.insert(0, item)
+
+                    # 3. Tự động Start
+                    self.page.run_task(item.toggle_download)
+                    count += 1
+
+            self.lbl_selected.value = f"✅ Đã thêm {count} file vào hàng đợi."
+            self.lbl_selected.color = "green"
+
         except Exception as ex:
-            self.log(f"Lỗi: {str(ex)}", "red")
-        self.progress_bar.visible = False;
+            self.lbl_selected.value = f"❌ Lỗi: {str(ex)}"
+            self.lbl_selected.color = "red"
+
         self.page.update()
 
     def get_view(self):
-        # Tab 1: Link
-        tab_link = ft.Column([
-            ft.Text("Tải qua Link (Public/Private)", weight="bold"),
-            ft.Row([self.link_input, ft.ElevatedButton("Tải", on_click=self.start_download_link)]),
-        ])
+        # --- CỘT TRÁI: ĐIỀU KHIỂN ---
+        left_panel = ft.Column([
+            ft.Text("Bước 1: Chọn nguồn", weight="bold"),
+            ft.ElevatedButton("Tải DS Nhóm", icon=ft.icons.REFRESH,
+                              on_click=lambda _: self.page.run_task(self.dialog_selector.load_dialogs)),
+            self.lbl_selected,
+            self.dialog_selector,
 
-        # Tab 2: Scan
-        btn_load = ft.ElevatedButton("Tải DS Nhóm", icon=ft.icons.REFRESH,
-                                     on_click=lambda _: self.page.run_task(self.dialog_selector.load_dialogs))
+            ft.Divider(),
+            ft.Text("Bước 2: Quét & Tải", weight="bold"),
+            ft.Row([
+                self.msg_limit_input,
+                # SỬA LỖI TẠI ĐÂY: ft.icons.PLAYLIST_ADD (viết hoa)
+                ft.ElevatedButton("Thêm vào hàng đợi", icon=ft.icons.PLAYLIST_ADD, on_click=self.add_task_to_queue,
+                                  expand=True)
+            ])
+        ], expand=4)
 
-        # Header Tab Scan
-        scan_header = ft.Row([btn_load, self.lbl_selected_source], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
+        # --- CỘT PHẢI: DANH SÁCH TASK ---
+        right_panel = ft.Column([
+            ft.Text("Danh sách hàng đợi (Tự động tải & Resume)", weight="bold"),
+            ft.Container(
+                content=self.task_list_col,
+                bgcolor=ft.colors.BLACK12,
+                border_radius=10,
+                padding=10,
+                expand=True
+            )
+        ], expand=6)
 
-        # Footer Tab Scan (Sửa lỗi expand của Button để tránh vỡ layout)
-        scan_footer = ft.Row([
-            ft.Row([ft.Text("Quét:", size=12), self.msg_limit_input, ft.Text("tin")],
-                   alignment=ft.MainAxisAlignment.START),
-            ft.ElevatedButton("DOWNLOAD", icon=ft.icons.DOWNLOAD, on_click=self.start_scan_download, bgcolor="blue",
-                              color="white")
-        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
-
-        # Content Tab Scan
-        tab_scan = ft.Column([
-            scan_header,
-            self.dialog_selector,  # Widget này sẽ tự động expand nhờ DialogSelector mới
-            ft.Container(height=5),
-            scan_footer
+        return ft.Column([
+            ft.Text("Download Manager Pro (Resume Supported)", size=20, weight="bold"),
+            ft.Row([left_panel, ft.VerticalDivider(width=1, color="grey"), right_panel], expand=True)
         ], expand=True)
-
-        tabs = ft.Tabs(
-            selected_index=1,
-            tabs=[ft.Tab(text="Dán Link", content=tab_link), ft.Tab(text="Chọn Nhóm", content=tab_scan)],
-            expand=True
-        )
-
-        layout = ft.Row(
-            controls=[
-                ft.Container(content=tabs, expand=5, padding=5,
-                             border=ft.border.only(right=ft.border.BorderSide(1, "grey"))),
-                ft.Container(
-                    content=ft.Column([
-                        ft.Text("Nhật ký (Logs)", weight="bold"),
-                        ft.Container(content=self.status_log, bgcolor=ft.colors.BLACK26, border_radius=5, padding=5,
-                                     expand=True),
-                        self.progress_text,
-                        self.progress_bar
-                    ], expand=True),
-                    expand=5, padding=10
-                )
-            ],
-            expand=True
-        )
-
-        return ft.Column([ft.Text("Download Manager", size=20, weight="bold"), layout], expand=True)

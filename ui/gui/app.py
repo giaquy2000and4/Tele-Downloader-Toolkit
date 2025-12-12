@@ -6,38 +6,36 @@ from ui.gui.screens.upload import UploadScreen
 
 
 async def main(page: ft.Page):
-    # 1. Cấu hình cửa sổ
     page.title = "Tele Downloader Toolkit Pro"
     page.theme_mode = ft.ThemeMode.DARK
     page.window_width = 1100
     page.window_height = 800
 
-    # 2. Khởi tạo Telegram Client
-    tele_client = TeleClient()
-    await tele_client.connect()
+    # Biến lưu client hiện tại (sẽ được set sau khi login)
+    app_state = {"client": None}
 
-    # 3. Định nghĩa Giao diện chính (Sidebar + Tabs)
+    # Hàm xây dựng giao diện chính
     def build_main_ui():
-        download_screen = DownloadScreen(page, tele_client)
-        upload_screen = UploadScreen(page, tele_client)
+        if not app_state["client"]:
+            return ft.Text("Lỗi: Chưa có Client")
 
-        # Danh sách nội dung các Tab
+        # Truyền client đã login vào các màn hình
+        download_screen = DownloadScreen(page, app_state["client"])
+        upload_screen = UploadScreen(page, app_state["client"])
+
         tabs_content = [
-            download_screen.get_view(),  # Index 0
-            upload_screen.get_view(),  # Index 1
-            ft.Container(content=ft.Text("Cài đặt / Account (Coming Soon)", size=20))  # Index 2
+            download_screen.get_view(),
+            upload_screen.get_view(),
+            ft.Container(content=ft.Text("Cài đặt / Info", size=20))
         ]
 
-        # Khu vực hiển thị nội dung bên phải
         content_area = ft.Container(content=tabs_content[0], expand=True, padding=20)
 
-        # Hàm đổi Tab khi bấm Sidebar
         def change_tab(e):
             selected_idx = e.control.selected_index
             content_area.content = tabs_content[selected_idx]
             content_area.update()
 
-        # Sidebar bên trái
         rail = ft.NavigationRail(
             selected_index=0,
             label_type=ft.NavigationRailLabelType.ALL,
@@ -51,9 +49,11 @@ async def main(page: ft.Page):
             on_change=change_tab,
         )
 
-        # Nút Đăng xuất ở góc trên phải (Optional)
         async def logout_action(e):
-            await tele_client.client.log_out()
+            # CHỈ NGẮT KẾT NỐI, KHÔNG XÓA SESSION TRÊN SERVER
+            if app_state["client"]:
+                await app_state["client"].disconnect()
+                app_state["client"] = None
             page.go("/login")
 
         return ft.View(
@@ -61,42 +61,35 @@ async def main(page: ft.Page):
             controls=[
                 ft.AppBar(
                     title=ft.Text("Tele Downloader Toolkit"),
-                    actions=[ft.IconButton(ft.icons.LOGOUT, tooltip="Đăng xuất", on_click=logout_action)]
+                    actions=[ft.IconButton(ft.icons.LOGOUT, tooltip="Đổi tài khoản", on_click=logout_action)]
                 ),
-                ft.Row(
-                    [
-                        rail,
-                        ft.VerticalDivider(width=1),
-                        content_area,
-                    ],
-                    expand=True,
-                )
+                ft.Row([rail, ft.VerticalDivider(width=1), content_area], expand=True)
             ]
         )
 
-    # 4. Hàm xử lý điều hướng (Router)
+    # Callback khi login thành công từ LoginScreen
+    def handle_login_success(active_client):
+        app_state["client"] = active_client
+        page.go("/")
+
     def route_change(route):
         page.views.clear()
 
         if page.route == "/login":
-            # Hiện màn hình đăng nhập
-            login_view = LoginScreen(page, tele_client).get_view()
-            page.views.append(login_view)
+            # Truyền class TeleClient và hàm callback vào LoginScreen
+            login_screen = LoginScreen(page, TeleClient, handle_login_success)
+            page.views.append(login_screen.get_view())
 
         elif page.route == "/":
-            # Hiện giao diện chính
+            if not app_state["client"]:
+                page.go("/login")
+                return
             page.views.append(build_main_ui())
 
         page.update()
 
-    # Gán hàm xử lý sự kiện
     page.on_route_change = route_change
-
-    # 5. Kiểm tra trạng thái đăng nhập ban đầu
-    if await tele_client.is_user_authorized():
-        page.go("/")
-    else:
-        page.go("/login")
+    page.go("/login")
 
 
 if __name__ == "__main__":
