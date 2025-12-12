@@ -4,4 +4,6 @@ session.session
 *.cfg
 sessions/
 refactoring-foundation.txt
+!storage/acc-01.session
+
 
