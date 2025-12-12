@@ -1,0 +1,4 @@
+telethon==1.32.0
+python-dotenv==1.0.0
+flet==0.21.2
+humanize==4.9.0

@@ -2,74 +2,108 @@ import flet as ft
 
 
 class DialogSelector(ft.UserControl):
-    def __init__(self, tele_client, on_dialog_selected):
+    def __init__(self, tele_client, on_dialog_selected, height=None):
         super().__init__()
         self.client = tele_client
         self.on_dialog_selected = on_dialog_selected
         self.dialogs = []
-        # Widget hiển thị danh sách
-        self.list_view = ft.ListView(expand=True, spacing=5, padding=10)
+        self.selected_id = None
+
+        # --- LOGIC SỬA LỖI OVERLAP/MATRIX ---
+        if height is None:
+            self.expand = True  # Báo cho cha biết widget này cần giãn tối đa
+        else:
+            self.height = height  # Dùng chiều cao cố định
+        # ------------------------------------
+
+        self.list_view = ft.ListView(expand=True, spacing=2, padding=5)
         self.search_box = ft.TextField(
-            label="Tìm kiếm nhóm/kênh...",
+            hint_text="🔍 Tìm kiếm nhóm/kênh...",
             on_change=self.filter_dialogs,
-            prefix_icon=ft.icons.SEARCH
+            prefix_icon=ft.icons.SEARCH,
+            height=40,
+            text_size=14,
+            content_padding=10
         )
-        self.loading = ft.ProgressBar(visible=False)
+        self.loading = ft.ProgressBar(visible=False, color="blue", height=2)
+        self.status_text = ft.Text("", size=12, color="grey")
 
     async def load_dialogs(self):
+        if self.dialogs: return
+
         self.loading.visible = True
+        self.status_text.value = "Đang tải danh sách..."
         self.update()
 
-        # Gọi hàm từ core/client.py
-        self.dialogs = await self.client.get_dialogs(limit=50)
+        try:
+            self.dialogs = await self.client.get_dialogs(limit=100)
+            self.render_list(self.dialogs)
+            self.status_text.value = f"Tìm thấy {len(self.dialogs)} kết quả."
+        except Exception as e:
+            self.status_text.value = f"Lỗi: {e}"
 
         self.loading.visible = False
-        self.render_list(self.dialogs)
         self.update()
 
     def render_list(self, data):
         self.list_view.controls.clear()
         if not data:
-            self.list_view.controls.append(ft.Text("Không tìm thấy đoạn chat nào."))
+            self.list_view.controls.append(ft.Text("Không tìm thấy.", italic=True))
 
         for chat in data:
             icon = ft.icons.PERSON
+            icon_color = ft.colors.BLUE_200
             if chat['type'] == "Channel":
-                icon = ft.icons.CAMPAIGN
+                icon = ft.icons.CAMPAIGN;
+                icon_color = ft.colors.ORANGE_200
             elif chat['type'] == "Group":
-                icon = ft.icons.GROUPS
+                icon = ft.icons.GROUPS;
+                icon_color = ft.colors.GREEN_200
+
+            is_selected = (self.selected_id == chat['id'])
+            bg_color = ft.colors.BLUE_900 if is_selected else ft.colors.with_opacity(0.05, ft.colors.WHITE)
 
             self.list_view.controls.append(
-                ft.ListTile(
-                    leading=ft.Icon(icon),
-                    title=ft.Text(chat['name']),
-                    subtitle=ft.Text(f"{chat['type']}"),
-                    on_click=lambda e, c=chat: self.select_chat(c),
-                    bgcolor=ft.colors.with_opacity(0.1, ft.colors.WHITE)
+                ft.Container(
+                    content=ft.ListTile(
+                        leading=ft.Icon(icon, color=icon_color),
+                        title=ft.Text(chat['name'], max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+                                      weight="bold" if is_selected else "normal"),
+                        subtitle=ft.Text(f"ID: {chat['id']}", size=10),
+                        on_click=lambda e, c=chat: self.handle_click(c),
+                        dense=True
+                    ),
+                    bgcolor=bg_color,
+                    border=ft.border.all(1, ft.colors.BLUE) if is_selected else None,
+                    border_radius=5,
+                    margin=ft.margin.only(bottom=2)
                 )
             )
         self.update()
 
+    def handle_click(self, chat):
+        self.selected_id = chat['id']
+        self.on_dialog_selected(chat)
+        self.filter_dialogs(None)
+
     def filter_dialogs(self, e):
-        search_term = self.search_box.value.lower()
+        search_term = self.search_box.value.lower() if self.search_box.value else ""
         if not search_term:
             self.render_list(self.dialogs)
         else:
             filtered = [d for d in self.dialogs if search_term in d['name'].lower()]
             self.render_list(filtered)
 
-    def select_chat(self, chat):
-        self.on_dialog_selected(chat)
-
     def build(self):
+        # Container này giờ chỉ cần chứa nội dung, việc expand đã được xử lý ở __init__
         return ft.Container(
-            height=400,
             border=ft.border.all(1, ft.colors.OUTLINE),
             border_radius=10,
             padding=10,
             content=ft.Column([
                 self.search_box,
                 self.loading,
-                ft.Container(content=self.list_view, expand=True)
+                self.status_text,
+                self.list_view
             ])
         )
