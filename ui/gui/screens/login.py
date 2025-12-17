@@ -39,7 +39,7 @@ class LoginScreen:
         sessions = SessionManager.get_all_sessions()
 
         if not sessions:
-            self.show_login_form(None)  # Nếu chưa có acc nào thì hiện form luôn
+            self.show_login_form(None)
             return
 
         self.account_list.controls.clear()
@@ -49,10 +49,22 @@ class LoginScreen:
                     content=ft.Row([
                         ft.Icon(ft.icons.ACCOUNT_CIRCLE, size=30, color="blue"),
                         ft.Text(sess_name, size=16, weight="bold", expand=True),
-                        ft.IconButton(ft.icons.LOGIN, tooltip="Đăng nhập",
-                                      on_click=lambda e, n=sess_name: self.login_existing(n)),
-                        ft.IconButton(ft.icons.DELETE, tooltip="Xóa", icon_color="red",
-                                      on_click=lambda e, n=sess_name: self.delete_account(n))
+
+                        # --- SỬA LỖI TẠI ĐÂY ---
+                        # Cũ (Gây lỗi): on_click=lambda e, n=sess_name: self.login_existing(n)
+                        # Mới (Đúng): Dùng self.page.run_task(...)
+                        ft.IconButton(
+                            ft.icons.LOGIN,
+                            tooltip="Đăng nhập",
+                            on_click=lambda e, n=sess_name: self.page.run_task(self.login_existing, n)
+                        ),
+
+                        ft.IconButton(
+                            ft.icons.DELETE,
+                            tooltip="Xóa",
+                            icon_color="red",
+                            on_click=lambda e, n=sess_name: self.delete_account(n)
+                        )
                     ]),
                     padding=10,
                     bgcolor=ft.colors.with_opacity(0.1, ft.colors.WHITE),
