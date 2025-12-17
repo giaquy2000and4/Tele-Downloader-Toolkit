@@ -1,5 +1,6 @@
 session.session
 storage/acc-01.session
+storage/acc-02.session
 *.env
 *.ini
 *.cfg
